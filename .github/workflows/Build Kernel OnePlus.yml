@@ -1216,6 +1216,11 @@ jobs:
             set_config "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
             set_config "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             set_config "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+            # [新增] SUSFS 自动隐藏特征宏 (完美解决 CLI 不支持及挂载痕迹暴露问题)
+            set_config "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y"
+            set_config "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y"
+            set_config "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_BIND_MOUNT=y"
+            set_config "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y"
           else
             set_config "CONFIG_KSU_SUSFS=n"
           fi
