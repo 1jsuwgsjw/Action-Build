@@ -779,7 +779,7 @@ jobs:
             SHORT_HASH=${MANUAL_HASH:0:8}
           fi
 
-          # 本地 SUSFS 增强：让 SukiSU builtin 分支识别 FILE_SPOOF 新能力
+          # 本地 SUSFS 增强：让 SukiSU builtin 分支识别 FILE_SPOOF / SUS_MAP_UID 新能力
           python3 - <<'PY'
           from pathlib import Path
           
@@ -813,7 +813,29 @@ jobs:
                       "#endif // #ifdef CONFIG_KSU_SUSFS_SPOOF_FILE",
                   ]) + "\n"
                   text = text.replace("#ifdef CONFIG_KSU_SUSFS_SUS_MAP", block + "#ifdef CONFIG_KSU_SUSFS_SUS_MAP", 1)
-                  dispatch.write_text(text)
+              if "CMD_SUSFS_ADD_SUS_MAP_UID" not in text:
+                  old = "\n".join([
+                      "        case CMD_SUSFS_ADD_SUS_MAP:",
+                      "            susfs_add_sus_map(arg);",
+                      "            return 0;",
+                  ])
+                  new = old + "\n" + "\n".join([
+                      "        case CMD_SUSFS_ADD_SUS_MAP_UID:",
+                      "            susfs_add_sus_map_uid(arg);",
+                      "            return 0;",
+                  ])
+                  if old in text:
+                      text = text.replace(old, new, 1)
+                  else:
+                      block = "\n".join([
+                          "#ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+                          "        case CMD_SUSFS_ADD_SUS_MAP_UID:",
+                          "            susfs_add_sus_map_uid(arg);",
+                          "            return 0;",
+                          "#endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP",
+                      ]) + "\n"
+                      text = text.replace("        default:", block + "        default:", 1)
+              dispatch.write_text(text)
           PY
           
           KSU_VERSION_TAG=$(curl -fsSL https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/latest \
@@ -1787,6 +1809,7 @@ jobs:
           
           test -f ./ksu_module_susfs/tools/ksu_susfs_arm64
           strings ./ksu_module_susfs/tools/ksu_susfs_arm64 | grep -q "add_file_spoof"
+          strings ./ksu_module_susfs/tools/ksu_susfs_arm64 | grep -q "add_sus_map_uid"
           
           cp -f ./ksu_module_susfs.zip "${GITHUB_WORKSPACE}/AnyKernel3/ksu_module_susfs_FILE_SPOOF.zip"
           # Numbersf/AnyKernel3 原脚本只识别旧固定文件名；保留一个兼容别名，避免刷机时提示 No SUSFS Module found。
