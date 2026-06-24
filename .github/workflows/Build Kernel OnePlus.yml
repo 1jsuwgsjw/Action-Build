@@ -1714,10 +1714,44 @@ jobs:
 
       - name: Setup Android NDK for local SUSFS module
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r26d
-          add-to-path: true
+        run: |
+          set -euo pipefail
+          echo "== Disk before NDK setup =="
+          df -h
+
+          # 旧的 setup-ndk action 会把 NDK 复制到 /opt/hostedtoolcache，r26d 经常触发 ENOSPC。
+          # 这里改为：优先复用 runner 预装 NDK；没有时清理空间并下载到 workspace，不再写 toolcache。
+          find_ndk_build() {
+            for base in               "${ANDROID_NDK_HOME:-}"               "${ANDROID_NDK_ROOT:-}"               "${NDK_HOME:-}"               "${ANDROID_HOME:-}/ndk"/*               "${ANDROID_SDK_ROOT:-}/ndk"/*               /usr/local/lib/android/sdk/ndk/*               "${RUNNER_TOOL_CACHE:-}/ndk"/*/x64; do
+              [ -n "$base" ] || continue
+              [ -x "$base/ndk-build" ] && { echo "$base"; return 0; }
+            done
+            return 1
+          }
+
+          NDK_DIR="$(find_ndk_build || true)"
+          if [ -z "$NDK_DIR" ]; then
+            echo "未找到预装 NDK，开始释放 GitHub Runner 空间并下载 android-ndk-r26d 到 workspace"
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk /opt/ghc               /usr/local/share/boost /usr/local/share/powershell /usr/share/swift               "${AGENT_TOOLSDIRECTORY:-}"/CodeQL "${RUNNER_TOOL_CACHE:-}"/CodeQL 2>/dev/null || true
+            sudo apt-get clean || true
+            rm -rf "$HOME/.cache" "$GITHUB_WORKSPACE/.gradle" 2>/dev/null || true
+            df -h
+
+            mkdir -p "$GITHUB_WORKSPACE/.android-ndk"
+            curl -L --retry 5 --retry-delay 5               -o "$GITHUB_WORKSPACE/android-ndk-r26d-linux.zip"               "https://dl.google.com/android/repository/android-ndk-r26d-linux.zip"
+            unzip -q "$GITHUB_WORKSPACE/android-ndk-r26d-linux.zip" -d "$GITHUB_WORKSPACE/.android-ndk"
+            rm -f "$GITHUB_WORKSPACE/android-ndk-r26d-linux.zip"
+            NDK_DIR="$GITHUB_WORKSPACE/.android-ndk/android-ndk-r26d"
+          fi
+
+          test -x "$NDK_DIR/ndk-build"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+          echo "$NDK_DIR" >> "$GITHUB_PATH"
+          "$NDK_DIR/ndk-build" -v
+          echo "== Disk after NDK setup =="
+          df -h
 
       - name: Build Local SUSFS Module with updated ksu_susfs
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
