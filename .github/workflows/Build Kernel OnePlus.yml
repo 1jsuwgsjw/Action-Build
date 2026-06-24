@@ -833,12 +833,24 @@ jobs:
       - name: Apply Patches SukiSU Ultra
         env:
           FILE: ${{ github.event.inputs.FILE }}
+          SUSFS_REPO_TOKEN: ${{ secrets.SUSFS_REPO_TOKEN }}
         run: |
           cd kernel_workspace
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             SUSFS_META="${{ github.event.inputs.SUSFS_META }}"
             # 使用我们维护过的 Ace 6 / gki-android15-6.6 SUSFS 仓库，不再拉上游未修补版
-            git clone https://github.com/1jsuwgsjw/susfs4ksu-gki-android15-6.6--.git -b main susfs4ksu
+            SUSFS_REPO_URL="https://github.com/1jsuwgsjw/susfs4ksu-gki-android15-6.6--.git"
+            if [ -n "${SUSFS_REPO_TOKEN:-}" ]; then
+              echo "使用 SUSFS_REPO_TOKEN 拉取私有/受限 SUSFS 仓库"
+              git clone "https://x-access-token:${SUSFS_REPO_TOKEN}@github.com/1jsuwgsjw/susfs4ksu-gki-android15-6.6--.git" -b main susfs4ksu
+              git -C susfs4ksu remote set-url origin "$SUSFS_REPO_URL"
+            else
+              if ! git ls-remote "$SUSFS_REPO_URL" >/dev/null 2>&1; then
+                echo "::error title=SUSFS repo inaccessible::无法匿名访问 $SUSFS_REPO_URL。请把仓库设为 Public，或在当前 Actions 仓库 Settings > Secrets 新增 SUSFS_REPO_TOKEN。"
+                exit 128
+              fi
+              git clone "$SUSFS_REPO_URL" -b main susfs4ksu
+            fi
             cd susfs4ksu
             if [ -n "$SUSFS_META" ]; then
               if [[ "$SUSFS_META" =~ ^[0-9]+$ ]]; then
