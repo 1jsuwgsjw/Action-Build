@@ -487,7 +487,7 @@ jobs:
           else
             echo "✅ APT 缓存命中，跳过 apt-get update"
           fi
-          sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-cache-debs" python3 git curl libelf-dev build-essential flex bison libssl-dev libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip gawk dos2unix kmod libdw-dev elfutils dwarves
+          sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-cache-debs" python3 git curl libelf-dev build-essential flex bison libssl-dev libncurses-dev liblz4-tool zlib1g-dev libxml2-utils rsync unzip zip gawk dos2unix kmod libdw-dev elfutils dwarves
           sudo rm -f ~/apt-cache-debs/lock
           sudo rm -rf ~/apt-cache-debs/partial
 
@@ -779,6 +779,43 @@ jobs:
             SHORT_HASH=${MANUAL_HASH:0:8}
           fi
 
+          # 本地 SUSFS 增强：让 SukiSU builtin 分支识别 FILE_SPOOF 新能力
+          python3 - <<'PY'
+          from pathlib import Path
+
+          kconfig = Path("kernel/Kconfig")
+          if kconfig.exists():
+              text = kconfig.read_text()
+              if "config KSU_SUSFS_SPOOF_FILE" not in text:
+                  block = "\n".join([
+                      "config KSU_SUSFS_SPOOF_FILE",
+                      "\tbool \"Enable to spoof file read content\"",
+                      "\tdepends on KSU_SUSFS",
+                      "\tdefault y",
+                      "\thelp",
+                      "\t  - Allow replacing read/readv/iocb read output of a target procfs/sysfs/regular file with user-defined content.",
+                      "\t  - Useful for small identity files like /proc/cpuinfo, /proc/device-tree/model and /sys/devices/soc0/* without bind mounts.",
+                      "\t  - Effective only on processes with pre-defined uid scheme.",
+                      "",
+                  ])
+                  text = text.replace("config KSU_SUSFS_SUS_MAP", block + "config KSU_SUSFS_SUS_MAP", 1)
+                  kconfig.write_text(text)
+
+          dispatch = Path("kernel/supercall/dispatch.c")
+          if dispatch.exists():
+              text = dispatch.read_text()
+              if "CMD_SUSFS_ADD_FILE_SPOOF" not in text:
+                  block = "\n".join([
+                      "#ifdef CONFIG_KSU_SUSFS_SPOOF_FILE",
+                      "        case CMD_SUSFS_ADD_FILE_SPOOF:",
+                      "            susfs_add_file_spoof(arg);",
+                      "            return 0;",
+                      "#endif // #ifdef CONFIG_KSU_SUSFS_SPOOF_FILE",
+                  ]) + "\n"
+                  text = text.replace("#ifdef CONFIG_KSU_SUSFS_SUS_MAP", block + "#ifdef CONFIG_KSU_SUSFS_SUS_MAP", 1)
+                  dispatch.write_text(text)
+          PY
+
           KSU_VERSION_TAG=$(curl -fsSL https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/latest \
             | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
           if [[ -z "$KSU_VERSION_TAG" || "$(printf '%s\n' "$KSU_VERSION_TAG" "3.1.7" | sort -V | head -n1)" != "3.1.7" ]]; then
@@ -838,28 +875,41 @@ jobs:
           cd kernel_workspace
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             SUSFS_META="${{ github.event.inputs.SUSFS_META }}"
-            # 使用我们维护过的 Ace 6 / gki-android15-6.6 SUSFS 仓库，不再拉上游未修补版
+            # 优先使用当前 Actions checkout 的仓库内容，避免私有仓库二次 git clone 认证失败
             SUSFS_REPO_URL="https://github.com/1jsuwgsjw/susfs4ksu-gki-android15-6.6--.git"
-            if [ -n "${SUSFS_REPO_TOKEN:-}" ]; then
+            LOCAL_SUSFS_PATCH="$GITHUB_WORKSPACE/kernel_patches/50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch"
+
+            if [ -f "$LOCAL_SUSFS_PATCH" ]; then
+              echo "检测到当前 Actions 仓库已包含 SUSFS 补丁，直接使用本地 checkout 内容"
+              mkdir -p susfs4ksu
+              cp -a "$GITHUB_WORKSPACE/kernel_patches" susfs4ksu/
+              [ -d "$GITHUB_WORKSPACE/ksu_susfs" ] && cp -a "$GITHUB_WORKSPACE/ksu_susfs" susfs4ksu/ || true
+              [ -d "$GITHUB_WORKSPACE/ksu_module_susfs" ] && cp -a "$GITHUB_WORKSPACE/ksu_module_susfs" susfs4ksu/ || true
+              [ -f "$GITHUB_WORKSPACE/build_ksu_susfs_tool.sh" ] && cp -a "$GITHUB_WORKSPACE/build_ksu_susfs_tool.sh" susfs4ksu/ || true
+              [ -f "$GITHUB_WORKSPACE/build_ksu_module.sh" ] && cp -a "$GITHUB_WORKSPACE/build_ksu_module.sh" susfs4ksu/ || true
+            elif [ -n "${SUSFS_REPO_TOKEN:-}" ]; then
               echo "使用 SUSFS_REPO_TOKEN 拉取私有/受限 SUSFS 仓库"
               git clone "https://x-access-token:${SUSFS_REPO_TOKEN}@github.com/1jsuwgsjw/susfs4ksu-gki-android15-6.6--.git" -b main susfs4ksu
               git -C susfs4ksu remote set-url origin "$SUSFS_REPO_URL"
             else
               if ! git ls-remote "$SUSFS_REPO_URL" >/dev/null 2>&1; then
-                echo "::error title=SUSFS repo inaccessible::无法匿名访问 $SUSFS_REPO_URL。请把仓库设为 Public，或在当前 Actions 仓库 Settings > Secrets 新增 SUSFS_REPO_TOKEN。"
+                echo "::error title=SUSFS repo inaccessible::当前工作区没有 kernel_patches，且无法匿名访问 $SUSFS_REPO_URL。请确认 workflow 放在 SUSFS 仓库内，或把 SUSFS 仓库设为 Public，或新增 SUSFS_REPO_TOKEN。"
                 exit 128
               fi
               git clone "$SUSFS_REPO_URL" -b main susfs4ksu
             fi
+
             cd susfs4ksu
-            if [ -n "$SUSFS_META" ]; then
+            if [ -n "$SUSFS_META" ] && [ -d .git ]; then
               if [[ "$SUSFS_META" =~ ^[0-9]+$ ]]; then
                 git checkout HEAD~$SUSFS_META
               else
                 git checkout "$SUSFS_META"
               fi
+            elif [ -n "$SUSFS_META" ]; then
+              echo "::warning title=SUSFS_META ignored::当前使用本地 checkout 补丁目录，不是 git clone 仓库，已忽略 SUSFS_META=$SUSFS_META"
             else
-              echo "SUSFS_META 为空，使用本仓库 main 最新 SUSFS"
+              echo "SUSFS_META 为空，使用本仓库 main/latest checkout SUSFS"
             fi
             cd ..
           fi
@@ -1204,6 +1254,7 @@ jobs:
           CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
           CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
           CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          CONFIG_KSU_SUSFS_SPOOF_FILE=y
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
           sed -i 's/^[[:space:]]*//' susfs_full_configs
@@ -1661,10 +1712,59 @@ jobs:
           mv -f oImage Image
           cp Image "${GITHUB_WORKSPACE}/AnyKernel3/Image"
 
+      - name: Setup Android NDK for local SUSFS module
+        if: ${{ github.event.inputs.SUSFS_META != '-1' }}
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: true
+
+      - name: Build Local SUSFS Module with updated ksu_susfs
+        if: ${{ github.event.inputs.SUSFS_META != '-1' }}
+        run: |
+          set -euo pipefail
+          SUSFS_DIR="${GITHUB_WORKSPACE}/kernel_workspace/susfs4ksu"
+          if [ ! -d "$SUSFS_DIR" ]; then
+            echo "::warning title=SUSFS module skipped::未找到 $SUSFS_DIR"
+            exit 0
+          fi
+
+          cd "$SUSFS_DIR"
+          if [ ! -f "./ksu_susfs/jni/features/file_spoof.c" ]; then
+            echo "::warning title=Old SUSFS userspace::当前 susfs4ksu 源码没有 file_spoof.c，跳过本地模块编译"
+            exit 0
+          fi
+
+          NDK_DIR="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+          if [ -n "$NDK_DIR" ]; then
+            export PATH="$NDK_DIR:$PATH"
+          fi
+          if ! command -v ndk-build >/dev/null 2>&1; then
+            FOUND_NDK_BUILD="$(find "$ANDROID_HOME" "$RUNNER_TOOL_CACHE" -type f -name ndk-build 2>/dev/null | head -n 1 || true)"
+            if [ -n "$FOUND_NDK_BUILD" ]; then
+              export PATH="$(dirname "$FOUND_NDK_BUILD"):$PATH"
+            fi
+          fi
+          command -v ndk-build
+
+          chmod +x ./build_ksu_susfs_tool.sh ./build_ksu_module.sh
+          ./build_ksu_susfs_tool.sh
+          ./build_ksu_module.sh
+
+          test -f ./ksu_module_susfs/tools/ksu_susfs_arm64
+          strings ./ksu_module_susfs/tools/ksu_susfs_arm64 | grep -q "add_file_spoof"
+
+          cp -f ./ksu_module_susfs.zip "${GITHUB_WORKSPACE}/AnyKernel3/ksu_module_susfs_FILE_SPOOF.zip"
+          echo "✅ 已打包新版 SUSFS 模块: AnyKernel3/ksu_module_susfs_FILE_SPOOF.zip"
+
       - name: Download Latest SUSFS Module from CI
         if: ${{ github.event.inputs.SUSFS_CI == 'CI' && github.event.inputs.SUSFS_META != '-1' }}
         continue-on-error: true
         run: |
+          if [ -f ./AnyKernel3/ksu_module_susfs_FILE_SPOOF.zip ]; then
+            echo "检测到本地新版 SUSFS 模块，跳过旧 CI 模块下载"
+            exit 0
+          fi
           LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
             jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
@@ -1685,6 +1785,10 @@ jobs:
         if: ${{ github.event.inputs.SUSFS_CI == 'Release' && github.event.inputs.SUSFS_META != '-1' }}
         continue-on-error: true
         run: |
+          if [ -f ./AnyKernel3/ksu_module_susfs_FILE_SPOOF.zip ]; then
+            echo "检测到本地新版 SUSFS 模块，跳过旧 Release 模块下载"
+            exit 0
+          fi
           wget -O ksu_module_susfs_1.5.2+_Release.zip https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip
           cp ksu_module_susfs_1.5.2+_Release.zip ./AnyKernel3/
 
