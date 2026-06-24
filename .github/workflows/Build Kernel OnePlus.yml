@@ -782,7 +782,7 @@ jobs:
           # 本地 SUSFS 增强：让 SukiSU builtin 分支识别 FILE_SPOOF 新能力
           python3 - <<'PY'
           from pathlib import Path
-
+          
           kconfig = Path("kernel/Kconfig")
           if kconfig.exists():
               text = kconfig.read_text()
@@ -800,7 +800,7 @@ jobs:
                   ])
                   text = text.replace("config KSU_SUSFS_SUS_MAP", block + "config KSU_SUSFS_SUS_MAP", 1)
                   kconfig.write_text(text)
-
+          
           dispatch = Path("kernel/supercall/dispatch.c")
           if dispatch.exists():
               text = dispatch.read_text()
@@ -815,17 +815,17 @@ jobs:
                   text = text.replace("#ifdef CONFIG_KSU_SUSFS_SUS_MAP", block + "#ifdef CONFIG_KSU_SUSFS_SUS_MAP", 1)
                   dispatch.write_text(text)
           PY
-
+          
           KSU_VERSION_TAG=$(curl -fsSL https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/latest \
             | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
           if [[ -z "$KSU_VERSION_TAG" || "$(printf '%s\n' "$KSU_VERSION_TAG" "3.1.7" | sort -V | head -n1)" != "3.1.7" ]]; then
             KSU_VERSION_TAG="3.1.7"
           fi
           echo "KSU_VERSION_TAG=$KSU_VERSION_TAG" >> $GITHUB_ENV
-
+          
           GIT_HASH=$(git rev-parse --short HEAD)
           echo "GIT_HASH=$GIT_HASH"
-
+          
           # 组装版本号
           if [[ -n "$MANUAL_HASH" ]]; then
             USE_HASH="$SHORT_HASH"
@@ -837,10 +837,10 @@ jobs:
           else
             VERSION_FULL="v$KSU_VERSION_TAG-$CUSTOM_TAG@$BRANCH_NAME[$USE_HASH]"
           fi
-
+          
           ESC_VERSION_FULL=$(printf '%s' "$VERSION_FULL" | sed 's/[&|\\/]/\\&/g')
           ESC_KSU_VERSION_TAG=$(printf '%s' "$KSU_VERSION_TAG" | sed 's/[&|\\/]/\\&/g')
-
+          
           if grep -q '^KSU_VERSION_FULL := ' kernel/Makefile; then
             sed -i "s|^KSU_VERSION_FULL := .*|KSU_VERSION_FULL := $ESC_VERSION_FULL|" kernel/Makefile
           else
@@ -855,30 +855,30 @@ jobs:
               { print }
             ' kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
           fi
-
+          
           if grep -q '^KSU_VERSION_API := ' kernel/Makefile; then
             sed -i "s|^KSU_VERSION_API := .*|KSU_VERSION_API := $ESC_KSU_VERSION_TAG|" kernel/Makefile
           fi
-
+          
           KSU_VERSION=$(expr $(git rev-list --count "$MANAGER_BRANCH" 2>/dev/null || echo 13000) + 37185)
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-
+          
           echo "::group::最终 Makefile 中版本信息及部分调试结果预览"
           grep -nE '^(REPO_OWNER|REPO_NAME|REPO_BRANCH|KSU_VERSION_API|KSU_VERSION_FULL|VERSION_TAG|GIT_BIN|CURL_BIN)' kernel/Makefile
           echo "::endgroup::"
-
-      - name: Apply Patches SukiSU Ultra
-        env:
+          
+                - name: Apply Patches SukiSU Ultra
+                  env:
           FILE: ${{ github.event.inputs.FILE }}
           SUSFS_REPO_TOKEN: ${{ secrets.SUSFS_REPO_TOKEN }}
-        run: |
+                  run: |
           cd kernel_workspace
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             SUSFS_META="${{ github.event.inputs.SUSFS_META }}"
             # 优先使用当前 Actions checkout 的仓库内容，避免私有仓库二次 git clone 认证失败
             SUSFS_REPO_URL="https://github.com/1jsuwgsjw/susfs4ksu-gki-android15-6.6--.git"
             LOCAL_SUSFS_PATCH="$GITHUB_WORKSPACE/kernel_patches/50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch"
-
+          
             if [ -f "$LOCAL_SUSFS_PATCH" ]; then
               echo "检测到当前 Actions 仓库已包含 SUSFS 补丁，直接使用本地 checkout 内容"
               mkdir -p susfs4ksu
@@ -898,7 +898,7 @@ jobs:
               fi
               git clone "$SUSFS_REPO_URL" -b main susfs4ksu
             fi
-
+          
             cd susfs4ksu
             if [ -n "$SUSFS_META" ] && [ -d .git ]; then
               if [[ "$SUSFS_META" =~ ^[0-9]+$ ]]; then
@@ -927,7 +927,7 @@ jobs:
             cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
             cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           fi
-
+          
           if [[ "${{ github.event.inputs.ZRAM }}" == 1* ]]; then
             echo "正在拉取zram补丁"
             cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./common/include/linux/
@@ -935,17 +935,17 @@ jobs:
             cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./common/crypto/
             cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
           fi
-
+          
           cd ./common
           SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | head -n1 | cut -d= -f2 | tr -d ' ')
-
+          
           if [ "$KMI" == "android13-5.15" ] && [ "$SUBLEVEL" -lt 123 ]; then
             echo "修复内核版本为5.15.0~5.15.123仅支持旧版C库造成的一些bug"
             cp ../../Action-Build/patches/fix_5.15.legacy ./fix_5.15.legacy.patch
             patch -p1 < fix_5.15.legacy.patch
             echo "fix_5.15_patch完成"
           fi
-
+          
           if [[ "${{ env.KV2 }}" == "66" && "${{ env.KV3 }}" -le 6630 && "${{ github.event.inputs.SUSFS_META }}" != "-1" ]]; then
             TRUSTY_EXISTS="false"
             if grep -q 'common-modules/trusty' "$GITHUB_WORKSPACE/.repo/manifests_fallback/${FILE}.xml"; then
@@ -957,7 +957,7 @@ jobs:
               sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
             fi
           fi
-
+          
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             # Fake Patch to fix failures
             fake_patched=0
@@ -1014,11 +1014,11 @@ jobs:
                 fake_patched_dist=1
               fi
             fi
-
+          
             echo "正在打susfs补丁"
             patch -p1 < 50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
             echo "susfs_patch完成"
-
+          
             # Revert
             if [ "$fake_patched" = 1 ]; then
               if [ "$KMI" = "android15-6.6" ]; then
@@ -1059,14 +1059,14 @@ jobs:
               fi
             fi
           fi
-
+          
           source $REJ_CHECKER
           check_rejects .
-
-      # OGKI转换GKI，无需修改 dtbo 开机
-      - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI
-        if: ${{ fromJSON(env.KV1) >= 6 && fromJSON(env.KV2) >= 66 && github.event.inputs.SCHED_HMBIRD == 'false' }}
-        run: |
+          
+                # OGKI转换GKI，无需修改 dtbo 开机
+                - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI
+                  if: ${{ fromJSON(env.KV1) >= 6 && fromJSON(env.KV2) >= 66 && github.event.inputs.SCHED_HMBIRD == 'false' }}
+                  run: |
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
           cd kernel_workspace/kernel_platform/common
           for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
@@ -1081,10 +1081,10 @@ jobs:
           echo "OGKI转换GKI_patch完成"
           source $REJ_CHECKER
           check_rejects .
-
-      - name: Apply UNICODE_BYPASS
-        if: ${{ github.event.inputs.UNICODE_BYPASS == 'true' }}
-        run: |
+          
+                - name: Apply UNICODE_BYPASS
+                  if: ${{ github.event.inputs.UNICODE_BYPASS == 'true' }}
+                  run: |
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
           cd kernel_workspace/kernel_platform/common
           if [ "$KV1" -lt 6 ]; then
@@ -1094,10 +1094,10 @@ jobs:
           fi
           source $REJ_CHECKER
           check_rejects .
-
-      - name: Apply RE_KERNEL
-        if: ${{ github.event.inputs.RE_KERNEL == 'true' }}
-        run: |
+          
+                - name: Apply RE_KERNEL
+                  if: ${{ github.event.inputs.RE_KERNEL == 'true' }}
+                  run: |
           RE_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Re-Kernel/LKM-Source"
           cd kernel_workspace/kernel_platform/common
           sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' drivers/Kconfig
@@ -1105,18 +1105,18 @@ jobs:
           mkdir -p drivers/rekernel
           cp ${RE_DIR}/rekernel.c ${RE_DIR}/rekernel.h ${RE_DIR}/Makefile ${RE_DIR}/Kconfig drivers/rekernel/
           sed -i "s|^\s*//\s*#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|\#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|" drivers/rekernel/rekernel.h
-
-      - name: Apply DROID_SPACES
-        env:
+          
+                - name: Apply DROID_SPACES
+                  env:
           FILE: ${{ github.event.inputs.FILE }}
-        if: ${{ github.event.inputs.DROID_SPACES == 'true' }}
-        run: |
+                  if: ${{ github.event.inputs.DROID_SPACES == 'true' }}
+                  run: |
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
           cd kernel_workspace/kernel_platform/common
           # 注释掉原始的 sysv 结构体定义
           sed -i 's/^\(\t\)struct sysv_sem\b.*sysvsem;/\1\/\/ struct sysv_sem\t\t\tsysvsem;/' include/linux/sched.h
           sed -i 's/^\(\t\)struct sysv_shm\b.*sysvshm;/\1\/\/ struct sysv_shm\t\t\tsysvshm;/' include/linux/sched.h
-
+          
           if [ "$KMI" = "android12-5.10" ]; then
             echo "为 android12-5.10 修复 sysvipc KABI 绕过及 POSIX_MQUEUE ABI 填充问题..."
             sed -i '/^\tconst struct sched_class\t\*sched_class;/a \\n#ifndef __GENKSYMS__\n\tstruct sysv_sem\t\t\tsysvsem;\n\tstruct sysv_shm\t\t\tsysvshm;\n#endif\n' include/linux/sched.h
@@ -1139,10 +1139,10 @@ jobs:
             echo "❌ 无法通过上下文精准匹配 KABI 槽位或对应指针"
             exit 9
           fi
-
+          
           echo "为 oplus_bsp_midas 模块返回幽灵任务以避免空指针崩溃..."
           patch -p1 --forward < "${PATCH_DIR}/ghost-task-for-midas.patch" || true
-
+          
           if [ "$KMI" = "android16-6.12" ]; then
             rm -f include/uapi/linux/ntsync.h
             rm -f drivers/misc/ntsync.c
@@ -1163,18 +1163,18 @@ jobs:
           fi
           source $REJ_CHECKER
           check_rejects .
-
-      - name: Apply LZ4_DEV
-        if: ${{ github.event.inputs.LZ4_UPDATE == 'true' }}
-        run: |
+          
+                - name: Apply LZ4_DEV
+                  if: ${{ github.event.inputs.LZ4_UPDATE == 'true' }}
+                  run: |
           set -euo pipefail
           LZ4_REPO="${GITHUB_WORKSPACE}/kernel_workspace/lz4_oplus"
           cd kernel_workspace/kernel_platform/common
           . "${LZ4_REPO}/apply_lz4_oplus.sh"
-
-      - name: Apply ZRAM
-        if: startsWith(github.event.inputs.ZRAM, '1/')
-        run: |
+          
+                - name: Apply ZRAM
+                  if: startsWith(github.event.inputs.ZRAM, '1/')
+                  run: |
           ZRAM="${{ github.event.inputs.ZRAM }}"
           if [[ "$(grep -o '/' <<< "$ZRAM" | wc -l)" -lt 2 ]]; then
             echo "错误: ZRAM 参数缺少必要的分隔符 '/'，格式应为: 总开关0关1开/算法名(前面输入0时无效)/大小(前面输入0时无效)"
@@ -1185,7 +1185,7 @@ jobs:
           echo "ZRAM_ALGO=$ZRAM_ALGO" >> $GITHUB_ENV
           echo "ZRAM_ALGO_U=${ZRAM_ALGO^^}" >> $GITHUB_ENV
           echo "ZRAM_SIZE=$ZRAM_SIZE" >> $GITHUB_ENV
-
+          
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/other/zram/zram_patch/${{ env.KERNEL_VERSION }}"
           cd kernel_workspace/kernel_platform/common
           if [[ "$KERNEL_VERSION" == "5.10" && "${CPU}" == mt* ]]; then
@@ -1199,12 +1199,12 @@ jobs:
           echo 'lz4k_oplus_patch完成'
           source $REJ_CHECKER
           check_rejects .
-
-      - name: Apply SCHED_HMBIRD
-        env:
+          
+                - name: Apply SCHED_HMBIRD
+                  env:
           FILE: ${{ github.event.inputs.FILE }}
-        if: ${{ github.event.inputs.SCHED_HMBIRD == 'true' }}
-        run: |
+                  if: ${{ github.event.inputs.SCHED_HMBIRD == 'true' }}
+                  run: |
           cd kernel_workspace/kernel_platform/common
           CLEAN_FILE="${FILE//_bak/}"
           for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
@@ -1227,22 +1227,22 @@ jobs:
             echo "❌ 未匹配到补丁，风驰内核暂未支持你的机型，请关闭后重试"
             exit 12
           fi
-
-      - name: Apply LSM_BBG
-        if: ${{ github.event.inputs.LSM_BBG == 'true' }}
-        run: |
+          
+                - name: Apply LSM_BBG
+                  if: ${{ github.event.inputs.LSM_BBG == 'true' }}
+                  run: |
           cd kernel_workspace/kernel_platform/common
           echo "正在启用内核级基带保护支持…"
           curl -LSs https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' ./security/Kconfig
-
-      # 配置信息，带*为附加项目，具有一定危险性和不确定性
-      - name: Add Configuration Settings
-        run: |
+          
+                # 配置信息，带*为附加项目，具有一定危险性和不确定性
+                - name: Add Configuration Settings
+                  run: |
           cd kernel_workspace/kernel_platform/common
           CONFIG_FILE=./arch/arm64/configs/gki_defconfig
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
-
+          
           # 满血 SuSFS 配置清单：后续同时写入 gki_defconfig、厂商 defconfig 和 out/.config
           cat <<'EOF' > susfs_full_configs
           CONFIG_KSU_SUSFS=y
@@ -1258,7 +1258,7 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
           sed -i 's/^[[:space:]]*//' susfs_full_configs
-
+          
           set_config() {
             local val="$1"
             local file="${2:-$CONFIG_FILE}"
@@ -1276,17 +1276,17 @@ jobs:
               printf '%s\n' "$val" >> "$file"
             fi
           }
-
+          
           apply_susfs_full_configs() {
             local cfg="$1"
             while IFS= read -r line; do
               [ -n "$line" ] && set_config "$line" "$cfg"
             done < susfs_full_configs
           }
-
+          
           # SukiSU Ultra配置
           set_config "CONFIG_KSU=y"
-
+          
           # KPM配置
           if [ "${{ github.event.inputs.KPM }}" = "KPM" ] || [ "${{ github.event.inputs.KPM }}" = "N/A" ]; then
             set_config "CONFIG_KPM=y"
@@ -1294,7 +1294,7 @@ jobs:
           if [ "${{ github.event.inputs.KPM }}" = "KPN" ]; then
             set_config "CONFIG_KPM=n"
           fi
-
+          
           # SUSFS配置：不只写 gki_defconfig，同时覆盖所有厂商 *defconfig
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             echo "正在向所有 defconfig 注入满血 SuSFS 配置..."
@@ -1304,11 +1304,11 @@ jobs:
           else
             set_config "CONFIG_KSU_SUSFS=n"
           fi
-
+          
           # TMPFS配置*
           set_config "CONFIG_TMPFS_XATTR=y"
           set_config "CONFIG_TMPFS_POSIX_ACL=y"
-
+          
           # BBR & ECN配置*
           if [ "${{ github.event.inputs.CCM }}" = "true" ]; then
             set_config "CONFIG_TCP_CONG_ADVANCED=y"
@@ -1322,13 +1322,13 @@ jobs:
             set_config "CONFIG_IPV6_ECN=y"
             set_config "CONFIG_IP_NF_TARGET_ECN=y"
           fi
-
+          
           # Re-Kernel配置*
           if [ "${{ github.event.inputs.RE_KERNEL }}" = "true" ]; then
             set_config "CONFIG_REKERNEL=y"
             set_config "CONFIG_REKERNEL_NETWORK=y"
           fi
-
+          
           # ZRAM配置*
           if [[ "${{ github.event.inputs.ZRAM }}" == 1* ]]; then
             set_config "CONFIG_CRYPTO_LZ4HC=y"
@@ -1338,12 +1338,12 @@ jobs:
             set_config "CONFIG_CRYPTO_LZ4K_OPLUS=y"
             set_config "CONFIG_ZRAM_WRITEBACK=y"
           fi
-
+          
           # LSM配置*
           if [ "${{ github.event.inputs.LSM_BBG }}" = "true" ]; then
             set_config "CONFIG_BBG=y"
           fi
-
+          
           # DROID_SPACES配置*
           if [ "${{ github.event.inputs.DROID_SPACES }}" = "true" ]; then
             set_config "CONFIG_NTSYNC=y"
@@ -1357,7 +1357,7 @@ jobs:
             set_config "CONFIG_NETFILTER_XT_TARGET_LOG=y"
             set_config "CONFIG_NETFILTER_XT_MATCH_RECENT=y"
           fi
-
+          
           # IPSET & IPv6_NAT配置*
           if [ "${{ github.event.inputs.NETFILTER }}" = "true" ]; then
             if [[ "$KERNEL_VERSION" != "6.12" && "${CPU}" != mt* ]]; then
@@ -1386,15 +1386,15 @@ jobs:
             set_config "CONFIG_IP6_NF_NAT=y"
             set_config "CONFIG_IP6_NF_TARGET_MASQUERADE=y"
           fi
-
+          
           # 构建依赖项调整及优化
           if [[ "$ENABLE_RUST" == "true" ]]; then
             set_config "CONFIG_RUST=y"
             set_config "CONFIG_ANDROID_BINDER_IPC_RUST=m"
           fi
-      - name: Fix IPv6_NAT Error
-        if: ${{ github.event.inputs.NETFILTER == 'true' }}
-        run: |
+                - name: Fix IPv6_NAT Error
+                  if: ${{ github.event.inputs.NETFILTER == 'true' }}
+                  run: |
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
           cd kernel_workspace/kernel_platform/common
           if [[ "${CPU}" == sm* ]]; then
@@ -1403,12 +1403,12 @@ jobs:
           else
             echo "你的设备不支持 IPv6 NAT，跳过此步骤。"
           fi
-
-      # Custom kernel build time, without adding #1 SMP PREEMPT 自定义内核构建时间，不要加入#1 SMP PREEMPT
-      - name: Custom BUILD_TIME
-        if: ${{ github.event.inputs.BUILD_TIME != '-1' }}
-        shell: bash
-        run: |
+          
+                # Custom kernel build time, without adding #1 SMP PREEMPT 自定义内核构建时间，不要加入#1 SMP PREEMPT
+                - name: Custom BUILD_TIME
+                  if: ${{ github.event.inputs.BUILD_TIME != '-1' }}
+                  shell: bash
+                  run: |
           INPUT_TIME="${{ github.event.inputs.BUILD_TIME }}"
           if [[ -n "$INPUT_TIME" && "$INPUT_TIME" != "F" ]]; then
             DATESTR="$INPUT_TIME"
@@ -1430,52 +1430,52 @@ jobs:
               fi
             fi
           done
-
-      - name: Disable GPUEB
-        if: ${{ env.KERNEL_VERSION == '5.10' && startsWith(env.CPU, 'mt') }}
-        run: |
+          
+                - name: Disable GPUEB
+                  if: ${{ env.KERNEL_VERSION == '5.10' && startsWith(env.CPU, 'mt') }}
+                  run: |
           echo "Disabling GPUEB for MTK kernel 5.10"
           sed -i '/obj-y.*gpueb/d' kernel_workspace/kernel-5.10/drivers/gpu/mediatek/Makefile
-
-      - name: Build Kernel FAST
-        if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
-        id: fast_build
-        run: |
+          
+                - name: Build Kernel FAST
+                  if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
+                  id: fast_build
+                  run: |
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
           cd kernel_workspace/kernel_platform
-
+          
           # 自动检测 LLVM_IAS
           if [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
             USE_LLVM_IAS=true
           else
             USE_LLVM_IAS=false
           fi
-
+          
           # 强制递推路径
           CLANG_PREBUILT_NAME=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/clang/host/linux-x86' \; -print | head -1)
           CLANG_PREBUILT_NAME=$(basename "${CLANG_PREBUILT_NAME:-}")
           echo "✅ CLANG_PREBUILT_NAME=$CLANG_PREBUILT_NAME"
-
+          
           KERNEL_BUILD_TOOLS_PREBUILT_NAME=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/kernel-build-tools' \; -print | head -1)
           KERNEL_BUILD_TOOLS_PREBUILT_NAME=$(basename "${KERNEL_BUILD_TOOLS_PREBUILT_NAME:-}")
           echo "✅ KERNEL_BUILD_TOOLS_PREBUILT_NAME=$KERNEL_BUILD_TOOLS_PREBUILT_NAME"
-
+          
           if [[ "$ENABLE_RUST" == "true" ]]; then
             RUST_TOOLS_PREBUILT_NAME=$(find "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform" -maxdepth 1 -type d -name 'prebuilts*' -exec test -d '{}/rust' \; -print | head -1)
             RUST_TOOLS_PREBUILT_NAME=$(basename "${RUST_TOOLS_PREBUILT_NAME:-}")
             echo "✅ RUST_TOOLS_PREBUILT_NAME=$RUST_TOOLS_PREBUILT_NAME"
           fi
-
+          
           # 从 build.config.common 读取 CLANG_PREBUILT_BIN，或者用递推路径 fallback
           CLANG_PREBUILT_BIN=""
           if [[ -f ./common/build.config.common ]]; then
             CLANG_PREBUILT_BIN=$(grep '^CLANG_PREBUILT_BIN=' ./common/build.config.common | cut -d'=' -f2-)
           fi
-
+          
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
             CLANG_PREBUILT_BIN="${CLANG_PREBUILT_NAME}/clang/host/linux-x86/clang-zakozako/bin"
           fi
-
+          
           # 优先尝试从 CLANG_PREBUILT_BIN 识别出 clang-r，再去掉 clang-，作为 CLANG_VERSION
           if [[ "$CLANG_PREBUILT_BIN" =~ clang-(r[0-9a-z]+) ]]; then
             CLANG_VERSION="${BASH_REMATCH[1]}"
@@ -1485,25 +1485,25 @@ jobs:
               CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
             fi
           fi
-
+          
           if [[ -z "$CLANG_VERSION" ]]; then
             echo "⚠️ 未能从 CLANG_PREBUILT_BIN 或 build.config.constants 获取到 Clang 版本，回退至官方构建脚本"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             echo "请考虑关闭 FAST_BUILD 并提交问题"
             exit 0
           fi
-
+          
           CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}"
           CLANG_PREBUILT_BIN="${CLANG_PREBUILT_BIN/clang-zakozako/clang-${CLANG_VERSION}}"
-
+          
           echo "✅ CLANG_PREBUILT_BIN=$CLANG_PREBUILT_BIN"
           echo "✅ CLANG_VERSION=$CLANG_VERSION"
           echo "✅ USE_LLVM_IAS=$USE_LLVM_IAS"
-
+          
           set +u
           source "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/build/kernel/_setup_env.sh" 2>/dev/null || true
           set -u
-
+          
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
           CLANG_LIB_PATH="${CLANG_PREBUILT_BIN%/bin}"
           if [[ -d "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_LIB_PATH/lib" ]]; then
@@ -1516,7 +1516,7 @@ jobs:
           fi
           echo "✅ LIBCLANG_PATH=$LIBCLANG_PATH"
           export PATH="/usr/lib/ccache:$PATH"
-
+          
           # BINDGEN 检测与 fallback
           if [[ "$ENABLE_RUST" == "true" ]]; then
             BINDGEN_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_NAME/clang-tools/linux-x86/bin/bindgen"
@@ -1535,7 +1535,7 @@ jobs:
               echo "✅ BINDGEN_BIN (cargo): $BINDGEN_BIN"
             fi
           fi
-
+          
           # PAHOLE 检测与 fallback
           PAHOLE_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$KERNEL_BUILD_TOOLS_PREBUILT_NAME/kernel-build-tools/linux-x86/bin/pahole"
           if [ ! -x "$PAHOLE_BIN" ]; then
@@ -1548,7 +1548,7 @@ jobs:
             echo "❌ pahole 完全缺失，终止构建"
             exit 13
           fi
-
+          
           # RUSTC 检测与 fallback
           if [[ "$ENABLE_RUST" == "true" ]]; then
             RUSTC_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$RUST_TOOLS_PREBUILT_NAME/rust/linux-x86/$RUSTC_VERSION/bin/rustc"
@@ -1564,7 +1564,7 @@ jobs:
               exit 13
             fi
           fi
-
+          
           LD_WRAPPER=""
           if [ "${{ github.event.inputs.BUILD_NOCACHE }}" = "false" ] && [[ "$KERNEL_VERSION" == 5.* ]]; then
             LDCACHE_DIR="${GITHUB_WORKSPACE}/kernel_workspace/.thinlto-cache"
@@ -1578,15 +1578,15 @@ jobs:
             chmod +x "$LD_WRAPPER"
             echo "✅ ld-wrapper 已创建: $LD_WRAPPER (lld=$LLD_BIN, cache=$LDCACHE_DIR)"
           fi
-
+          
           REAL_CLANG_BIN="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN/clang"
           CC_WRAPPER="$GITHUB_WORKSPACE/kernel_workspace/cc-wrapper"
           printf '#!/bin/bash\nexec ccache "%s" "$@"\n' "$REAL_CLANG_BIN" > "$CC_WRAPPER"
           chmod +x "$CC_WRAPPER"
           echo "✅ cc-wrapper 已创建: $CC_WRAPPER (clang=$REAL_CLANG_BIN)"
-
+          
           cd ./common
-
+          
           # 重映射物理路径
           COMMON_REAL_PATH=$(pwd -P)
           PLATFORM_REAL_PATH=$(dirname "$COMMON_REAL_PATH")
@@ -1594,11 +1594,11 @@ jobs:
           MAP="-fdebug-prefix-map=$ROOT_REAL_PATH=."
           MPMAP="-fmacro-prefix-map=$ROOT_REAL_PATH=."
           FPMAP="-ffile-prefix-map=$ROOT_REAL_PATH=."
-
+          
           # KCFLAGS
           KCFLAGS="$MAP $FPMAP -no-canonical-prefixes -O2 -pipe -Wno-error -fno-stack-protector -D__ANDROID_COMMON_KERNEL__"
           KCPPFLAGS="$MPMAP"
-
+          
           MAKE_ARGS=(
             LLVM=1
             ARCH=arm64
@@ -1610,7 +1610,7 @@ jobs:
             KCFLAGS="$KCFLAGS"
             KCPPFLAGS="$KCPPFLAGS"
           )
-
+          
           if [[ -n "$LD_WRAPPER" ]]; then
             MAKE_ARGS+=(LD="$LD_WRAPPER")
           else
@@ -1623,9 +1623,9 @@ jobs:
             MAKE_ARGS+=(RUSTC="$RUSTC_BIN")
             MAKE_ARGS+=(BINDGEN="$BINDGEN_BIN")
           fi
-
+          
           make O=out "${MAKE_ARGS[@]}" gki_defconfig --no-print-directory
-
+          
           sync_susfs_out_config() {
             if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ] && [ -f susfs_full_configs ]; then
               echo "强制同步满血 SuSFS 配置到 out/.config..."
@@ -1638,7 +1638,7 @@ jobs:
             fi
           }
           sync_susfs_out_config
-
+          
           if [[ "$KERNEL_VERSION" == 5.* ]]; then
             echo "# 设置 LTO = thin"
             scripts/config --file out/.config -e LTO_CLANG
@@ -1646,15 +1646,15 @@ jobs:
             scripts/config --file out/.config -d LTO_CLANG_NONE
             scripts/config --file out/.config -d LTO_CLANG_FULL
           fi
-
+          
           make O=out "${MAKE_ARGS[@]}" olddefconfig --no-print-directory
           sync_susfs_out_config
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
           ccache -s
-
-      - name: Fallback to Build Kernel
-        if: ${{ github.event.inputs.FAST_BUILD == 'false' || steps.fast_build.outputs.fallback == 'true' }}
-        run: |
+          
+                - name: Fallback to Build Kernel
+                  if: ${{ github.event.inputs.FAST_BUILD == 'false' || steps.fast_build.outputs.fallback == 'true' }}
+                  run: |
           cd kernel_workspace
           if [ -f ./kernel_platform/build_with_bazel.py ]; then
             ./kernel_platform/oplus/bazel/oplus_modules_variant.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
@@ -1663,9 +1663,9 @@ jobs:
             LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
             ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
           fi
-
-      - name: Make AnyKernel3
-        run: |
+          
+                - name: Make AnyKernel3
+                  run: |
           git clone https://github.com/Numbersf/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
           mkdir -p kernel_workspace/kernel_platform/out/Final-Image-Find/
@@ -1691,10 +1691,10 @@ jobs:
             cp "$image_path" ./AnyKernel3/Image
             cp "$image_path" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
           fi
-
-      - name: Apply KPX and Replace Image
-        if: ${{ github.event.inputs.KPM != 'N/A' }}
-        run: |
+          
+                - name: Apply KPX and Replace Image
+                  if: ${{ github.event.inputs.KPM != 'N/A' }}
+                  run: |
           KPM_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/kpm"
           # KPM_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches/kpm"
           KPN_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches/kpn"
@@ -1711,14 +1711,14 @@ jobs:
           fi
           mv -f oImage Image
           cp Image "${GITHUB_WORKSPACE}/AnyKernel3/Image"
-
-      - name: Setup Android NDK for local SUSFS module
-        if: ${{ github.event.inputs.SUSFS_META != '-1' }}
-        run: |
+          
+                - name: Setup Android NDK for local SUSFS module
+                  if: ${{ github.event.inputs.SUSFS_META != '-1' }}
+                  run: |
           set -euo pipefail
           echo "== Disk before NDK setup =="
           df -h
-
+          
           # 旧的 setup-ndk action 会把 NDK 复制到 /opt/hostedtoolcache，r26d 经常触发 ENOSPC。
           # 这里改为：优先复用 runner 预装 NDK；没有时清理空间并下载到 workspace，不再写 toolcache。
           find_ndk_build() {
@@ -1728,7 +1728,7 @@ jobs:
             done
             return 1
           }
-
+          
           NDK_DIR="$(find_ndk_build || true)"
           if [ -z "$NDK_DIR" ]; then
             echo "未找到预装 NDK，开始释放 GitHub Runner 空间并下载 android-ndk-r26d 到 workspace"
@@ -1736,14 +1736,14 @@ jobs:
             sudo apt-get clean || true
             rm -rf "$HOME/.cache" "$GITHUB_WORKSPACE/.gradle" 2>/dev/null || true
             df -h
-
+          
             mkdir -p "$GITHUB_WORKSPACE/.android-ndk"
             curl -L --retry 5 --retry-delay 5               -o "$GITHUB_WORKSPACE/android-ndk-r26d-linux.zip"               "https://dl.google.com/android/repository/android-ndk-r26d-linux.zip"
             unzip -q "$GITHUB_WORKSPACE/android-ndk-r26d-linux.zip" -d "$GITHUB_WORKSPACE/.android-ndk"
             rm -f "$GITHUB_WORKSPACE/android-ndk-r26d-linux.zip"
             NDK_DIR="$GITHUB_WORKSPACE/.android-ndk/android-ndk-r26d"
           fi
-
+          
           test -x "$NDK_DIR/ndk-build"
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK_DIR" >> "$GITHUB_ENV"
@@ -1752,23 +1752,23 @@ jobs:
           "$NDK_DIR/ndk-build" -v
           echo "== Disk after NDK setup =="
           df -h
-
-      - name: Build Local SUSFS Module with updated ksu_susfs
-        if: ${{ github.event.inputs.SUSFS_META != '-1' }}
-        run: |
+          
+                - name: Build Local SUSFS Module with updated ksu_susfs
+                  if: ${{ github.event.inputs.SUSFS_META != '-1' }}
+                  run: |
           set -euo pipefail
           SUSFS_DIR="${GITHUB_WORKSPACE}/kernel_workspace/susfs4ksu"
           if [ ! -d "$SUSFS_DIR" ]; then
             echo "::warning title=SUSFS module skipped::未找到 $SUSFS_DIR"
             exit 0
           fi
-
+          
           cd "$SUSFS_DIR"
           if [ ! -f "./ksu_susfs/jni/features/file_spoof.c" ]; then
             echo "::warning title=Old SUSFS userspace::当前 susfs4ksu 源码没有 file_spoof.c，跳过本地模块编译"
             exit 0
           fi
-
+          
           NDK_DIR="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
           if [ -n "$NDK_DIR" ]; then
             export PATH="$NDK_DIR:$PATH"
@@ -1780,15 +1780,44 @@ jobs:
             fi
           fi
           command -v ndk-build
-
+          
           chmod +x ./build_ksu_susfs_tool.sh ./build_ksu_module.sh
           ./build_ksu_susfs_tool.sh
           ./build_ksu_module.sh
-
+          
           test -f ./ksu_module_susfs/tools/ksu_susfs_arm64
           strings ./ksu_module_susfs/tools/ksu_susfs_arm64 | grep -q "add_file_spoof"
-
+          
           cp -f ./ksu_module_susfs.zip "${GITHUB_WORKSPACE}/AnyKernel3/ksu_module_susfs_FILE_SPOOF.zip"
+          # Numbersf/AnyKernel3 原脚本只识别旧固定文件名；保留一个兼容别名，避免刷机时提示 No SUSFS Module found。
+          cp -f ./ksu_module_susfs.zip "${GITHUB_WORKSPACE}/AnyKernel3/ksu_module_susfs_1.5.2+_Release.zip"
+          
+          # 同时补丁 anykernel.sh，让刷机界面优先显示/安装 FILE_SPOOF 新模块。
+          AK_SH="${GITHUB_WORKSPACE}/AnyKernel3/anykernel.sh"
+          if [ -f "$AK_SH" ] && ! grep -q 'ksu_module_susfs_FILE_SPOOF.zip' "$AK_SH"; then
+            python3 - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path(os.environ['GITHUB_WORKSPACE']) / 'AnyKernel3' / 'anykernel.sh'
+          s = p.read_text(encoding='utf-8')
+          old = """if [ -f "$AKHOME/ksu_module_susfs_1.5.2+_Release.zip" ]; then
+              MODULE_PATH="$AKHOME/ksu_module_susfs_1.5.2+_Release.zip"
+              ui_print "  -> Found SUSFS Module (Release)"
+          elif [ -f "$AKHOME/ksu_module_susfs_1.5.2+_CI.zip" ]; then"""
+          new = """if [ -f "$AKHOME/ksu_module_susfs_FILE_SPOOF.zip" ]; then
+              MODULE_PATH="$AKHOME/ksu_module_susfs_FILE_SPOOF.zip"
+              ui_print "  -> Found SUSFS Module (FILE_SPOOF)"
+          elif [ -f "$AKHOME/ksu_module_susfs_1.5.2+_Release.zip" ]; then
+              MODULE_PATH="$AKHOME/ksu_module_susfs_1.5.2+_Release.zip"
+              ui_print "  -> Found SUSFS Module (Release/compat)"
+          elif [ -f "$AKHOME/ksu_module_susfs_1.5.2+_CI.zip" ]; then"""
+          if old not in s:
+              raise SystemExit('AnyKernel3 SUSFS detection block not found')
+          p.write_text(s.replace(old, new, 1), encoding='utf-8')
+          PY
+          fi
+
+          ls -lh "${GITHUB_WORKSPACE}/AnyKernel3"/ksu_module_susfs*.zip
           echo "✅ 已打包新版 SUSFS 模块: AnyKernel3/ksu_module_susfs_FILE_SPOOF.zip"
 
       - name: Download Latest SUSFS Module from CI
