@@ -867,11 +867,11 @@ jobs:
           grep -nE '^(REPO_OWNER|REPO_NAME|REPO_BRANCH|KSU_VERSION_API|KSU_VERSION_FULL|VERSION_TAG|GIT_BIN|CURL_BIN)' kernel/Makefile
           echo "::endgroup::"
           
-                - name: Apply Patches SukiSU Ultra
-                  env:
+      - name: Apply Patches SukiSU Ultra
+        env:
           FILE: ${{ github.event.inputs.FILE }}
           SUSFS_REPO_TOKEN: ${{ secrets.SUSFS_REPO_TOKEN }}
-                  run: |
+        run: |
           cd kernel_workspace
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             SUSFS_META="${{ github.event.inputs.SUSFS_META }}"
@@ -1063,10 +1063,10 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
           
-                # OGKI转换GKI，无需修改 dtbo 开机
-                - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI
-                  if: ${{ fromJSON(env.KV1) >= 6 && fromJSON(env.KV2) >= 66 && github.event.inputs.SCHED_HMBIRD == 'false' }}
-                  run: |
+      # OGKI转换GKI，无需修改 dtbo 开机
+      - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI
+        if: ${{ fromJSON(env.KV1) >= 6 && fromJSON(env.KV2) >= 66 && github.event.inputs.SCHED_HMBIRD == 'false' }}
+        run: |
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
           cd kernel_workspace/kernel_platform/common
           for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
@@ -1082,9 +1082,9 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
           
-                - name: Apply UNICODE_BYPASS
-                  if: ${{ github.event.inputs.UNICODE_BYPASS == 'true' }}
-                  run: |
+      - name: Apply UNICODE_BYPASS
+        if: ${{ github.event.inputs.UNICODE_BYPASS == 'true' }}
+        run: |
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
           cd kernel_workspace/kernel_platform/common
           if [ "$KV1" -lt 6 ]; then
@@ -1095,9 +1095,9 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
           
-                - name: Apply RE_KERNEL
-                  if: ${{ github.event.inputs.RE_KERNEL == 'true' }}
-                  run: |
+      - name: Apply RE_KERNEL
+        if: ${{ github.event.inputs.RE_KERNEL == 'true' }}
+        run: |
           RE_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Re-Kernel/LKM-Source"
           cd kernel_workspace/kernel_platform/common
           sed -i '/endmenu/i source "drivers/rekernel/Kconfig"' drivers/Kconfig
@@ -1106,11 +1106,11 @@ jobs:
           cp ${RE_DIR}/rekernel.c ${RE_DIR}/rekernel.h ${RE_DIR}/Makefile ${RE_DIR}/Kconfig drivers/rekernel/
           sed -i "s|^\s*//\s*#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|\#define KERNEL_${KERNEL_SHORT_PATCH_VERSION}|" drivers/rekernel/rekernel.h
           
-                - name: Apply DROID_SPACES
-                  env:
+      - name: Apply DROID_SPACES
+        env:
           FILE: ${{ github.event.inputs.FILE }}
-                  if: ${{ github.event.inputs.DROID_SPACES == 'true' }}
-                  run: |
+        if: ${{ github.event.inputs.DROID_SPACES == 'true' }}
+        run: |
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
           cd kernel_workspace/kernel_platform/common
           # 注释掉原始的 sysv 结构体定义
@@ -1164,17 +1164,17 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
           
-                - name: Apply LZ4_DEV
-                  if: ${{ github.event.inputs.LZ4_UPDATE == 'true' }}
-                  run: |
+      - name: Apply LZ4_DEV
+        if: ${{ github.event.inputs.LZ4_UPDATE == 'true' }}
+        run: |
           set -euo pipefail
           LZ4_REPO="${GITHUB_WORKSPACE}/kernel_workspace/lz4_oplus"
           cd kernel_workspace/kernel_platform/common
           . "${LZ4_REPO}/apply_lz4_oplus.sh"
           
-                - name: Apply ZRAM
-                  if: startsWith(github.event.inputs.ZRAM, '1/')
-                  run: |
+      - name: Apply ZRAM
+        if: startsWith(github.event.inputs.ZRAM, '1/')
+        run: |
           ZRAM="${{ github.event.inputs.ZRAM }}"
           if [[ "$(grep -o '/' <<< "$ZRAM" | wc -l)" -lt 2 ]]; then
             echo "错误: ZRAM 参数缺少必要的分隔符 '/'，格式应为: 总开关0关1开/算法名(前面输入0时无效)/大小(前面输入0时无效)"
@@ -1200,11 +1200,11 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
           
-                - name: Apply SCHED_HMBIRD
-                  env:
+      - name: Apply SCHED_HMBIRD
+        env:
           FILE: ${{ github.event.inputs.FILE }}
-                  if: ${{ github.event.inputs.SCHED_HMBIRD == 'true' }}
-                  run: |
+        if: ${{ github.event.inputs.SCHED_HMBIRD == 'true' }}
+        run: |
           cd kernel_workspace/kernel_platform/common
           CLEAN_FILE="${FILE//_bak/}"
           for p in ./kernel/sched/hmbird* ./vendor/oplus/kernel/cpu/sched_ext/hmbird*; do
@@ -1228,17 +1228,17 @@ jobs:
             exit 12
           fi
           
-                - name: Apply LSM_BBG
-                  if: ${{ github.event.inputs.LSM_BBG == 'true' }}
-                  run: |
+      - name: Apply LSM_BBG
+        if: ${{ github.event.inputs.LSM_BBG == 'true' }}
+        run: |
           cd kernel_workspace/kernel_platform/common
           echo "正在启用内核级基带保护支持…"
           curl -LSs https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' ./security/Kconfig
           
-                # 配置信息，带*为附加项目，具有一定危险性和不确定性
-                - name: Add Configuration Settings
-                  run: |
+      # 配置信息，带*为附加项目，具有一定危险性和不确定性
+      - name: Add Configuration Settings
+        run: |
           cd kernel_workspace/kernel_platform/common
           CONFIG_FILE=./arch/arm64/configs/gki_defconfig
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
@@ -1392,9 +1392,9 @@ jobs:
             set_config "CONFIG_RUST=y"
             set_config "CONFIG_ANDROID_BINDER_IPC_RUST=m"
           fi
-                - name: Fix IPv6_NAT Error
-                  if: ${{ github.event.inputs.NETFILTER == 'true' }}
-                  run: |
+      - name: Fix IPv6_NAT Error
+        if: ${{ github.event.inputs.NETFILTER == 'true' }}
+        run: |
           PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
           cd kernel_workspace/kernel_platform/common
           if [[ "${CPU}" == sm* ]]; then
@@ -1404,11 +1404,11 @@ jobs:
             echo "你的设备不支持 IPv6 NAT，跳过此步骤。"
           fi
           
-                # Custom kernel build time, without adding #1 SMP PREEMPT 自定义内核构建时间，不要加入#1 SMP PREEMPT
-                - name: Custom BUILD_TIME
-                  if: ${{ github.event.inputs.BUILD_TIME != '-1' }}
-                  shell: bash
-                  run: |
+      # Custom kernel build time, without adding #1 SMP PREEMPT 自定义内核构建时间，不要加入#1 SMP PREEMPT
+      - name: Custom BUILD_TIME
+        if: ${{ github.event.inputs.BUILD_TIME != '-1' }}
+        shell: bash
+        run: |
           INPUT_TIME="${{ github.event.inputs.BUILD_TIME }}"
           if [[ -n "$INPUT_TIME" && "$INPUT_TIME" != "F" ]]; then
             DATESTR="$INPUT_TIME"
@@ -1431,16 +1431,16 @@ jobs:
             fi
           done
           
-                - name: Disable GPUEB
-                  if: ${{ env.KERNEL_VERSION == '5.10' && startsWith(env.CPU, 'mt') }}
-                  run: |
+      - name: Disable GPUEB
+        if: ${{ env.KERNEL_VERSION == '5.10' && startsWith(env.CPU, 'mt') }}
+        run: |
           echo "Disabling GPUEB for MTK kernel 5.10"
           sed -i '/obj-y.*gpueb/d' kernel_workspace/kernel-5.10/drivers/gpu/mediatek/Makefile
           
-                - name: Build Kernel FAST
-                  if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
-                  id: fast_build
-                  run: |
+      - name: Build Kernel FAST
+        if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
+        id: fast_build
+        run: |
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
           cd kernel_workspace/kernel_platform
           
@@ -1652,9 +1652,9 @@ jobs:
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
           ccache -s
           
-                - name: Fallback to Build Kernel
-                  if: ${{ github.event.inputs.FAST_BUILD == 'false' || steps.fast_build.outputs.fallback == 'true' }}
-                  run: |
+      - name: Fallback to Build Kernel
+        if: ${{ github.event.inputs.FAST_BUILD == 'false' || steps.fast_build.outputs.fallback == 'true' }}
+        run: |
           cd kernel_workspace
           if [ -f ./kernel_platform/build_with_bazel.py ]; then
             ./kernel_platform/oplus/bazel/oplus_modules_variant.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
@@ -1664,8 +1664,8 @@ jobs:
             ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
           fi
           
-                - name: Make AnyKernel3
-                  run: |
+      - name: Make AnyKernel3
+        run: |
           git clone https://github.com/Numbersf/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
           mkdir -p kernel_workspace/kernel_platform/out/Final-Image-Find/
@@ -1692,9 +1692,9 @@ jobs:
             cp "$image_path" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
           fi
           
-                - name: Apply KPX and Replace Image
-                  if: ${{ github.event.inputs.KPM != 'N/A' }}
-                  run: |
+      - name: Apply KPX and Replace Image
+        if: ${{ github.event.inputs.KPM != 'N/A' }}
+        run: |
           KPM_DIR="${GITHUB_WORKSPACE}/kernel_workspace/SukiSU_patch/kpm"
           # KPM_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches/kpm"
           KPN_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches/kpn"
@@ -1712,9 +1712,9 @@ jobs:
           mv -f oImage Image
           cp Image "${GITHUB_WORKSPACE}/AnyKernel3/Image"
           
-                - name: Setup Android NDK for local SUSFS module
-                  if: ${{ github.event.inputs.SUSFS_META != '-1' }}
-                  run: |
+      - name: Setup Android NDK for local SUSFS module
+        if: ${{ github.event.inputs.SUSFS_META != '-1' }}
+        run: |
           set -euo pipefail
           echo "== Disk before NDK setup =="
           df -h
@@ -1753,9 +1753,9 @@ jobs:
           echo "== Disk after NDK setup =="
           df -h
           
-                - name: Build Local SUSFS Module with updated ksu_susfs
-                  if: ${{ github.event.inputs.SUSFS_META != '-1' }}
-                  run: |
+      - name: Build Local SUSFS Module with updated ksu_susfs
+        if: ${{ github.event.inputs.SUSFS_META != '-1' }}
+        run: |
           set -euo pipefail
           SUSFS_DIR="${GITHUB_WORKSPACE}/kernel_workspace/susfs4ksu"
           if [ ! -d "$SUSFS_DIR" ]; then
