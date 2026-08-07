@@ -191,42 +191,6 @@ on:
         description: "是否停用此次缓存？"
         required: true
         default: false
-      BUILD_VM_BRIDGE:
-        type: boolean
-        description: "是否在完整内核输出树上编译 vm_bridge_01.ko？"
-        required: true
-        default: true
-      VM_BRIDGE_REPOSITORY:
-        type: string
-        description: "vm_bridge_01 源码仓库(owner/repo)"
-        required: false
-        default: "1jsuwgsjw/DeltaKernel-Android-KO-Build"
-      VM_BRIDGE_REF:
-        type: string
-        description: "vm_bridge_01 源码分支、标签或提交"
-        required: false
-        default: "343c839f9af533f1b958457be5a3faf683f31c35"
-      VM_BRIDGE_TARGET_RELEASE:
-        type: string
-        description: "目标 uname -r；默认锁定当前设备并强制校验完整内核输出"
-        required: false
-        default: "6.6.89-android15-7-o-g880af585653a9e"
-      VM_BRIDGE_TARGET_CLANG:
-        type: string
-        description: "目标完整内核 clang 版本；默认锁定当前设备基线"
-        required: false
-        default: "r510928"
-      VM_BRIDGE_TARGET_CONFIG_SHA256:
-        type: string
-        description: "当前设备内核 Image 中 IKCONFIG 的 SHA-256"
-        required: false
-        default: "7d0be339c9e16f4f8880700cac24e90ff24ce40044077656d97c8b4aa7152e3c"
-      VM_BRIDGE_REFERENCE_IMAGE_SHA256:
-        type: string
-        description: "当前设备对应完整内核 Image 的 SHA-256"
-        required: false
-        default: "7af010b8e92be131b075d3c9331c156c4caa21c35a7b3c0472f384719d1d129b"
-
 jobs:
   build:
     name: ${{ github.event.inputs.FAST_BUILD == 'true' && ' [FAST]' || '' }}${{ contains(github.event.inputs.FILE, '_aosp') && ' [AOSP]' || '' }}${{ github.event.inputs.KPM == 'KPM' && ' [KPM]' || github.event.inputs.KPM == 'KPN' && ' [KPN]' || '' }}${{ github.event.inputs.LSM_BBG == 'true' && ' [BBG]' || '' }}${{ github.event.inputs.SCHED_HMBIRD == 'true' && ' [HMBIRD]' || '' }}${{ github.event.inputs.DROID_SPACES == 'true' && ' [DS]' || '' }}${{ startsWith(github.event.inputs.ZRAM, '1/') && ' [ZRAM]' || '' }}${{ github.event.inputs.RE_KERNEL == 'true' && ' [REKER]' || '' }}${{ github.event.inputs.LZ4_UPDATE == 'true' && ' [LZ4UPD]' || '' }}For ${{ github.event.inputs.FILE }} ${{ github.event.inputs.SUFFIX }}
@@ -237,6 +201,13 @@ jobs:
       CCACHE_NOHARDLINK: "true"
       CCACHE_IS_KERNEL_COMPILING: "true"
       CCACHE_MAXSIZE: 5G
+      VM_BRIDGE_BUILD: ${{ github.event.inputs.FILE == 'oneplus_ace_6' }}
+      VM_BRIDGE_REPOSITORY: "1jsuwgsjw/DeltaKernel-Android-KO-Build"
+      VM_BRIDGE_REF: "343c839f9af533f1b958457be5a3faf683f31c35"
+      VM_BRIDGE_TARGET_RELEASE: "6.6.89-android15-7-o-g880af585653a9e"
+      VM_BRIDGE_TARGET_CLANG: "r510928"
+      VM_BRIDGE_TARGET_CONFIG_SHA256: "7d0be339c9e16f4f8880700cac24e90ff24ce40044077656d97c8b4aa7152e3c"
+      VM_BRIDGE_REFERENCE_IMAGE_SHA256: "7af010b8e92be131b075d3c9331c156c4caa21c35a7b3c0472f384719d1d129b"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -256,7 +227,7 @@ jobs:
         id: extract_info
         env:
           FILE: ${{ github.event.inputs.FILE }}
-          BUILD_VM_BRIDGE: ${{ github.event.inputs.BUILD_VM_BRIDGE }}
+          BUILD_VM_BRIDGE: ${{ env.VM_BRIDGE_BUILD }}
         run: |
           set -e
           cd "$GITHUB_WORKSPACE"
@@ -400,13 +371,13 @@ jobs:
           echo "Selected DROID_SPACES: ${{ github.event.inputs.DROID_SPACES }}"
           echo "Selected RE_KERNEL: ${{ github.event.inputs.RE_KERNEL }}"
           echo "Selected LZ4_UPDATE: ${{ github.event.inputs.LZ4_UPDATE }}"
-          echo "Selected BUILD_VM_BRIDGE: ${{ github.event.inputs.BUILD_VM_BRIDGE }}"
-          echo "Selected VM_BRIDGE_REPOSITORY: ${{ github.event.inputs.VM_BRIDGE_REPOSITORY }}"
-          echo "Selected VM_BRIDGE_REF: ${{ github.event.inputs.VM_BRIDGE_REF }}"
-          echo "Selected VM_BRIDGE_TARGET_RELEASE: ${{ github.event.inputs.VM_BRIDGE_TARGET_RELEASE }}"
-          echo "Selected VM_BRIDGE_TARGET_CLANG: ${{ github.event.inputs.VM_BRIDGE_TARGET_CLANG }}"
-          echo "Selected VM_BRIDGE_TARGET_CONFIG_SHA256: ${{ github.event.inputs.VM_BRIDGE_TARGET_CONFIG_SHA256 }}"
-          echo "Selected VM_BRIDGE_REFERENCE_IMAGE_SHA256: ${{ github.event.inputs.VM_BRIDGE_REFERENCE_IMAGE_SHA256 }}"
+          echo "Selected VM_BRIDGE_BUILD: $VM_BRIDGE_BUILD"
+          echo "Selected VM_BRIDGE_REPOSITORY: $VM_BRIDGE_REPOSITORY"
+          echo "Selected VM_BRIDGE_REF: $VM_BRIDGE_REF"
+          echo "Selected VM_BRIDGE_TARGET_RELEASE: $VM_BRIDGE_TARGET_RELEASE"
+          echo "Selected VM_BRIDGE_TARGET_CLANG: $VM_BRIDGE_TARGET_CLANG"
+          echo "Selected VM_BRIDGE_TARGET_CONFIG_SHA256: $VM_BRIDGE_TARGET_CONFIG_SHA256"
+          echo "Selected VM_BRIDGE_REFERENCE_IMAGE_SHA256: $VM_BRIDGE_REFERENCE_IMAGE_SHA256"
 
           BUILD_TIME="${{ github.event.inputs.BUILD_TIME }}"
           SUFFIX="${{ github.event.inputs.SUFFIX }}"
@@ -470,7 +441,7 @@ jobs:
           echo "------------------------------"
 
       - name: Validate vm_bridge exact kernel baseline
-        if: ${{ github.event.inputs.BUILD_VM_BRIDGE == 'true' }}
+        if: ${{ env.VM_BRIDGE_BUILD == 'true' }}
         shell: bash
         env:
           FILE: ${{ github.event.inputs.FILE }}
@@ -530,11 +501,11 @@ jobs:
           echo "vm_bridge exact kernel baseline validated"
 
       - name: Checkout vm_bridge_01 source
-        if: ${{ github.event.inputs.BUILD_VM_BRIDGE == 'true' }}
+        if: ${{ env.VM_BRIDGE_BUILD == 'true' }}
         uses: actions/checkout@v6
         with:
-          repository: ${{ github.event.inputs.VM_BRIDGE_REPOSITORY }}
-          ref: ${{ github.event.inputs.VM_BRIDGE_REF }}
+          repository: ${{ env.VM_BRIDGE_REPOSITORY }}
+          ref: ${{ env.VM_BRIDGE_REF }}
           path: vm_bridge_source
           fetch-depth: 0
 
@@ -563,7 +534,7 @@ jobs:
           git config --global user.email "263623064@qq.com"
           mkdir kernel_workspace && cd kernel_workspace
           git clone https://github.com/Numbersf/Action-Build.git -b SukiSU-Ultra
-          if [[ "${{ github.event.inputs.BUILD_VM_BRIDGE }}" == "true" ]]; then
+          if [[ "${{ env.VM_BRIDGE_BUILD }}" == "true" ]]; then
             git -C Action-Build checkout --detach 0f53922ab1ff678d0898c0f7a8655a29f3649cd8
             test "$(git -C Action-Build rev-parse HEAD)" = "0f53922ab1ff678d0898c0f7a8655a29f3649cd8"
           fi
@@ -665,7 +636,7 @@ jobs:
       - name: Initialize Repo and Sync
         env:
           FILE: ${{ github.event.inputs.FILE }}
-          BUILD_VM_BRIDGE: ${{ github.event.inputs.BUILD_VM_BRIDGE }}
+          BUILD_VM_BRIDGE: ${{ env.VM_BRIDGE_BUILD }}
         run: |
           cd kernel_workspace
           mkdir -p .repo/manifests
@@ -792,9 +763,9 @@ jobs:
       - name: Resolve Kernel Suffix for vm_bridge target
         shell: bash
         env:
-          BUILD_VM_BRIDGE: ${{ github.event.inputs.BUILD_VM_BRIDGE }}
+          BUILD_VM_BRIDGE: ${{ env.VM_BRIDGE_BUILD }}
           REQUESTED_SUFFIX: ${{ github.event.inputs.SUFFIX }}
-          VM_BRIDGE_TARGET_RELEASE: ${{ github.event.inputs.VM_BRIDGE_TARGET_RELEASE }}
+          VM_BRIDGE_TARGET_RELEASE: ${{ env.VM_BRIDGE_TARGET_RELEASE }}
         run: |
           # CTF|认证
           set -euo pipefail
@@ -927,7 +898,7 @@ jobs:
 
       - name: Add SukiSU Ultra
         env:
-          BUILD_VM_BRIDGE: ${{ github.event.inputs.BUILD_VM_BRIDGE }}
+          BUILD_VM_BRIDGE: ${{ env.VM_BRIDGE_BUILD }}
         run: |
           cd kernel_workspace/kernel_platform
           MANAGER_BRANCH="${{ steps.manager.outputs.manager_branch }}"
@@ -1131,7 +1102,7 @@ jobs:
             git clone https://github.com/Numbersf/lz4_oplus.git
           fi
           git clone https://github.com/ShirkNeko/SukiSU_patch.git
-          if [[ "${{ github.event.inputs.BUILD_VM_BRIDGE }}" == "true" ]]; then
+          if [[ "${{ env.VM_BRIDGE_BUILD }}" == "true" ]]; then
             git -C SukiSU_patch checkout --detach 547ae94bcaec53d030398f857950c64662043a5d
             test "$(git -C SukiSU_patch rev-parse HEAD)" = "547ae94bcaec53d030398f857950c64662043a5d"
           fi
@@ -1429,7 +1400,7 @@ jobs:
             }
           done
           git clone https://github.com/Numbersf/SCHED_PATCH.git -b $CPU || { echo "❌ CPU 分支不存在，风驰内核暂未支持你的机型，请关闭后重试"; exit 11; }
-          if [[ "${{ github.event.inputs.BUILD_VM_BRIDGE }}" == "true" ]]; then
+          if [[ "${{ env.VM_BRIDGE_BUILD }}" == "true" ]]; then
             git -C SCHED_PATCH checkout --detach 16e2147f532fab115cc1ca4de9c58917d6500001
             test "$(git -C SCHED_PATCH rev-parse HEAD)" = "16e2147f532fab115cc1ca4de9c58917d6500001"
           fi
@@ -1452,7 +1423,7 @@ jobs:
         run: |
           cd kernel_workspace/kernel_platform/common
           echo "正在启用内核级基带保护支持…"
-          if [[ "${{ github.event.inputs.BUILD_VM_BRIDGE }}" == "true" ]]; then
+          if [[ "${{ env.VM_BRIDGE_BUILD }}" == "true" ]]; then
             git clone https://github.com/vc-teahouse/Baseband-guard.git Baseband-guard
             git -C Baseband-guard checkout --detach cef0daaef94d46022e1f8883ba7a30dfab849dbe
             curl -LSs https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/cef0daaef94d46022e1f8883ba7a30dfab849dbe/setup.sh \
@@ -1892,14 +1863,9 @@ jobs:
           fi
 
       - name: Build vm_bridge_01 against completed kernel
-        if: ${{ github.event.inputs.BUILD_VM_BRIDGE == 'true' }}
+        if: ${{ env.VM_BRIDGE_BUILD == 'true' }}
         shell: bash
         env:
-          VM_BRIDGE_TARGET_RELEASE: ${{ github.event.inputs.VM_BRIDGE_TARGET_RELEASE }}
-          VM_BRIDGE_TARGET_CLANG: ${{ github.event.inputs.VM_BRIDGE_TARGET_CLANG }}
-          VM_BRIDGE_TARGET_CONFIG_SHA256: ${{ github.event.inputs.VM_BRIDGE_TARGET_CONFIG_SHA256 }}
-          VM_BRIDGE_REPOSITORY: ${{ github.event.inputs.VM_BRIDGE_REPOSITORY }}
-          VM_BRIDGE_REF: ${{ github.event.inputs.VM_BRIDGE_REF }}
         run: |
           # CTF|认证
           set -euo pipefail
@@ -1990,11 +1956,10 @@ jobs:
           cp Image "${GITHUB_WORKSPACE}/AnyKernel3/Image"
 
       - name: Record final vm_bridge kernel image evidence
-        if: ${{ github.event.inputs.BUILD_VM_BRIDGE == 'true' }}
+        if: ${{ env.VM_BRIDGE_BUILD == 'true' }}
         id: vm_bridge_image
         shell: bash
         env:
-          VM_BRIDGE_REFERENCE_IMAGE_SHA256: ${{ github.event.inputs.VM_BRIDGE_REFERENCE_IMAGE_SHA256 }}
         run: |
           # CTF|认证
           set -euo pipefail
@@ -2015,7 +1980,7 @@ jobs:
             | xargs -0 sha256sum > "$EVIDENCE/SHA256SUMS"
 
       - name: Upload vm_bridge_01 ABI evidence
-        if: ${{ always() && github.event.inputs.BUILD_VM_BRIDGE == 'true' }}
+        if: ${{ always() && env.VM_BRIDGE_BUILD == 'true' }}
         uses: actions/upload-artifact@v7
         with:
           name: vm_bridge_01_${{ github.event.inputs.FILE }}_${{ env.KERNEL_VERSION }}
@@ -2024,7 +1989,7 @@ jobs:
           retention-days: 90
 
       - name: Validate final vm_bridge kernel image
-        if: ${{ github.event.inputs.BUILD_VM_BRIDGE == 'true' && steps.vm_bridge_image.outputs.image_match != 'true' }}
+        if: ${{ env.VM_BRIDGE_BUILD == 'true' && steps.vm_bridge_image.outputs.image_match != 'true' }}
         shell: bash
         run: |
           echo "最终 Image 与当前设备的参考 Image 不一致；证据 artifact 已上传。" >&2
