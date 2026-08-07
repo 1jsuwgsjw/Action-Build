@@ -537,6 +537,17 @@ jobs:
           if [[ "${{ env.VM_BRIDGE_BUILD }}" == "true" ]]; then
             git -C Action-Build checkout --detach 0f53922ab1ff678d0898c0f7a8655a29f3649cd8
             test "$(git -C Action-Build rev-parse HEAD)" = "0f53922ab1ff678d0898c0f7a8655a29f3649cd8"
+            # 将当前 workflow checkout 中的固定 SUSFS 快照归档到稳定路径。
+            # Maximize Build Space 可能迁移 GITHUB_WORKSPACE，不能依赖原始相对路径。
+            if git -C "$GITHUB_WORKSPACE" cat-file -e HEAD:kernel_patches/SOURCE_COMMIT 2>/dev/null; then
+              git -C "$GITHUB_WORKSPACE" archive --format=tar HEAD kernel_patches | tar -x -C Action-Build
+              for extra in ksu_susfs ksu_module_susfs build_ksu_susfs_tool.sh build_ksu_module.sh; do
+                if git -C "$GITHUB_WORKSPACE" cat-file -e "HEAD:$extra" 2>/dev/null; then
+                  git -C "$GITHUB_WORKSPACE" archive --format=tar HEAD "$extra" | tar -x -C Action-Build
+                fi
+              done
+              test -f Action-Build/kernel_patches/SOURCE_COMMIT
+            fi
           fi
 
       - name: Fork Check
@@ -1059,20 +1070,26 @@ jobs:
             SUSFS_META="${{ github.event.inputs.SUSFS_META }}"
             # 优先使用已固定在当前 checkout 中的 SUSFS 快照；只有快照缺失时才允许远端回退。
             SUSFS_REPO_URL="https://github.com/1jsuwgsjw/susfs4ksu-gki-android15-6.6--.git"
-            SUSFS_PATCH_NAME="50_add_susfs_in_gki-${KANDROID_VERSION}-${KERNEL_VERSION}.patch"
+            SUSFS_PATCH_NAME=""
             SUSFS_SOURCE_ROOT=""
             for candidate in \
               "$GITHUB_WORKSPACE/kernel_patches" \
               "$GITHUB_WORKSPACE/kernel_workspace/Action-Build/kernel_patches"; do
-              if [ -f "$candidate/$SUSFS_PATCH_NAME" ] && [ -f "$candidate/SOURCE_COMMIT" ]; then
+              patch_path="$(find "$candidate" -maxdepth 1 -type f -name '50_add_susfs_in_gki-*.patch' -print -quit 2>/dev/null || true)"
+              if [ -n "$patch_path" ] && [ -f "$candidate/SOURCE_COMMIT" ]; then
                 SUSFS_SOURCE_ROOT="$candidate"
+                SUSFS_PATCH_NAME="$(basename "$patch_path")"
                 break
               fi
             done
             if [ -z "$SUSFS_SOURCE_ROOT" ]; then
-              SUSFS_SOURCE_ROOT="$(find "$GITHUB_WORKSPACE" -type f -name "$SUSFS_PATCH_NAME" -printf '%h' -quit 2>/dev/null || true)"
-              if [ -n "$SUSFS_SOURCE_ROOT" ] && [ ! -f "$SUSFS_SOURCE_ROOT/SOURCE_COMMIT" ]; then
-                SUSFS_SOURCE_ROOT=""
+              patch_path="$(find "$GITHUB_WORKSPACE" -type f -name '50_add_susfs_in_gki-*.patch' -print -quit 2>/dev/null || true)"
+              if [ -n "$patch_path" ]; then
+                candidate="$(dirname "$patch_path")"
+                if [ -f "$candidate/SOURCE_COMMIT" ]; then
+                  SUSFS_SOURCE_ROOT="$candidate"
+                  SUSFS_PATCH_NAME="$(basename "$patch_path")"
+                fi
               fi
             fi
 
@@ -1124,7 +1141,7 @@ jobs:
           cd kernel_platform
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             echo "正在拉取susfs补丁"
-            cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
+            cp "../susfs4ksu/kernel_patches/$SUSFS_PATCH_NAME" ./common/
             cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
             cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           fi
@@ -1154,8 +1171,8 @@ jobs:
             fi
             if [[ "$TRUSTY_EXISTS" == "false" ]]; then
               echo "修复内核版本为6.6.0~6.6.30的机型源码及清单中缺失TrustyOS导致的susfs报错"
-              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' 50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
-              sed -i '/#include <trace\/hooks\/fs.h>/d' 50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
+              sed -i 's/-32,12 +32,38/-32,11 +32,37/g' "$SUSFS_PATCH_NAME"
+              sed -i '/#include <trace\/hooks\/fs.h>/d' "$SUSFS_PATCH_NAME"
             fi
           fi
           
@@ -1217,7 +1234,7 @@ jobs:
             fi
           
             echo "正在打susfs补丁"
-            patch -p1 < 50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+            patch -p1 < "$SUSFS_PATCH_NAME" || true
             echo "susfs_patch完成"
           
             # Revert
@@ -1916,7 +1933,8 @@ jobs:
             printf 'action_build_commit=%s\n' "$GITHUB_SHA"
             printf 'vm_bridge_repository=%s\n' "$VM_BRIDGE_REPOSITORY"
             printf 'vm_bridge_ref=%s\n' "$VM_BRIDGE_REF"
-            printf 'susfs_source_commit=%s\n' "$(tr -d '[:space:]' < "$GITHUB_WORKSPACE/kernel_patches/SOURCE_COMMIT")"
+            SUSFS_SOURCE_COMMIT="$(git -C "$GITHUB_WORKSPACE" show HEAD:kernel_patches/SOURCE_COMMIT 2>/dev/null | tr -d '[:space:]' || true)"
+            printf 'susfs_source_commit=%s\n' "${SUSFS_SOURCE_COMMIT:-unknown}"
           } >> "$EVIDENCE/build_metadata.txt"
           find "$EVIDENCE" -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
             | xargs -0 sha256sum > "$EVIDENCE/SHA256SUMS"
