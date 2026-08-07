@@ -537,17 +537,19 @@ jobs:
           if [[ "${{ env.VM_BRIDGE_BUILD }}" == "true" ]]; then
             git -C Action-Build checkout --detach 0f53922ab1ff678d0898c0f7a8655a29f3649cd8
             test "$(git -C Action-Build rev-parse HEAD)" = "0f53922ab1ff678d0898c0f7a8655a29f3649cd8"
-            # 将当前 workflow checkout 中的固定 SUSFS 快照归档到稳定路径。
-            # Maximize Build Space 可能迁移 GITHUB_WORKSPACE，不能依赖原始相对路径。
-            if git -C "$GITHUB_WORKSPACE" cat-file -e HEAD:kernel_patches/SOURCE_COMMIT 2>/dev/null; then
-              git -C "$GITHUB_WORKSPACE" archive --format=tar HEAD kernel_patches | tar -x -C Action-Build
-              for extra in ksu_susfs ksu_module_susfs build_ksu_susfs_tool.sh build_ksu_module.sh; do
-                if git -C "$GITHUB_WORKSPACE" cat-file -e "HEAD:$extra" 2>/dev/null; then
-                  git -C "$GITHUB_WORKSPACE" archive --format=tar HEAD "$extra" | tar -x -C Action-Build
-                fi
-              done
-              test -f Action-Build/kernel_patches/SOURCE_COMMIT
-            fi
+            # 第二次 actions/checkout 后原始工作区路径不稳定，因此在 kernel_workspace
+            # 内按当前 workflow SHA 单独检出固定 SUSFS 快照。
+            SUSFS_SNAPSHOT_CHECKOUT="$GITHUB_WORKSPACE/kernel_workspace/susfs-snapshot-source"
+            git clone --depth=1 --branch "$GITHUB_REF_NAME" \
+              "https://github.com/${GITHUB_REPOSITORY}.git" "$SUSFS_SNAPSHOT_CHECKOUT"
+            git -C "$SUSFS_SNAPSHOT_CHECKOUT" fetch --depth=1 origin "$GITHUB_SHA"
+            git -C "$SUSFS_SNAPSHOT_CHECKOUT" checkout --detach "$GITHUB_SHA"
+            test "$(git -C "$SUSFS_SNAPSHOT_CHECKOUT" rev-parse HEAD)" = "$GITHUB_SHA"
+            test -f "$SUSFS_SNAPSHOT_CHECKOUT/kernel_patches/SOURCE_COMMIT"
+            cp -a "$SUSFS_SNAPSHOT_CHECKOUT/kernel_patches" Action-Build/
+            for extra in ksu_susfs ksu_module_susfs build_ksu_susfs_tool.sh build_ksu_module.sh; do
+              [ ! -e "$SUSFS_SNAPSHOT_CHECKOUT/$extra" ] || cp -a "$SUSFS_SNAPSHOT_CHECKOUT/$extra" Action-Build/
+            done
           fi
 
       - name: Fork Check
@@ -1101,6 +1103,9 @@ jobs:
               [ -d "$GITHUB_WORKSPACE/ksu_module_susfs" ] && cp -a "$GITHUB_WORKSPACE/ksu_module_susfs" susfs4ksu/ || true
               [ -f "$GITHUB_WORKSPACE/build_ksu_susfs_tool.sh" ] && cp -a "$GITHUB_WORKSPACE/build_ksu_susfs_tool.sh" susfs4ksu/ || true
               [ -f "$GITHUB_WORKSPACE/build_ksu_module.sh" ] && cp -a "$GITHUB_WORKSPACE/build_ksu_module.sh" susfs4ksu/ || true
+            elif [[ "$VM_BRIDGE_BUILD" == "true" ]]; then
+              echo "::error title=Vendored SUSFS snapshot missing::vm_bridge 精确构建禁止回退到远端 SUSFS；固定快照未进入 kernel_workspace。"
+              exit 129
             elif [ -n "${SUSFS_REPO_TOKEN:-}" ]; then
               echo "使用 SUSFS_REPO_TOKEN 拉取私有/受限 SUSFS 仓库"
               git clone "https://x-access-token:${SUSFS_REPO_TOKEN}@github.com/1jsuwgsjw/susfs4ksu-gki-android15-6.6--.git" -b main susfs4ksu
