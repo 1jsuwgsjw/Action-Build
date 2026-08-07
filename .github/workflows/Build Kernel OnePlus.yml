@@ -1057,14 +1057,29 @@ jobs:
           cd kernel_workspace
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             SUSFS_META="${{ github.event.inputs.SUSFS_META }}"
-            # 优先使用当前 Actions checkout 的仓库内容，避免私有仓库二次 git clone 认证失败
+            # 优先使用已固定在当前 checkout 中的 SUSFS 快照；只有快照缺失时才允许远端回退。
             SUSFS_REPO_URL="https://github.com/1jsuwgsjw/susfs4ksu-gki-android15-6.6--.git"
-            LOCAL_SUSFS_PATCH="$GITHUB_WORKSPACE/kernel_patches/50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch"
-          
-            if [ -f "$LOCAL_SUSFS_PATCH" ]; then
-              echo "检测到当前 Actions 仓库已包含 SUSFS 补丁，直接使用本地 checkout 内容"
+            SUSFS_PATCH_NAME="50_add_susfs_in_gki-${KANDROID_VERSION}-${KERNEL_VERSION}.patch"
+            SUSFS_SOURCE_ROOT=""
+            for candidate in \
+              "$GITHUB_WORKSPACE/kernel_patches" \
+              "$GITHUB_WORKSPACE/kernel_workspace/Action-Build/kernel_patches"; do
+              if [ -f "$candidate/$SUSFS_PATCH_NAME" ] && [ -f "$candidate/SOURCE_COMMIT" ]; then
+                SUSFS_SOURCE_ROOT="$candidate"
+                break
+              fi
+            done
+            if [ -z "$SUSFS_SOURCE_ROOT" ]; then
+              SUSFS_SOURCE_ROOT="$(find "$GITHUB_WORKSPACE" -type f -name "$SUSFS_PATCH_NAME" -printf '%h' -quit 2>/dev/null || true)"
+              if [ -n "$SUSFS_SOURCE_ROOT" ] && [ ! -f "$SUSFS_SOURCE_ROOT/SOURCE_COMMIT" ]; then
+                SUSFS_SOURCE_ROOT=""
+              fi
+            fi
+
+            if [ -n "$SUSFS_SOURCE_ROOT" ]; then
+              echo "检测到固定 SUSFS 快照: $SUSFS_SOURCE_ROOT (commit $(tr -d '[:space:]' < "$SUSFS_SOURCE_ROOT/SOURCE_COMMIT"))"
               mkdir -p susfs4ksu
-              cp -a "$GITHUB_WORKSPACE/kernel_patches" susfs4ksu/
+              cp -a "$SUSFS_SOURCE_ROOT" susfs4ksu/kernel_patches
               [ -d "$GITHUB_WORKSPACE/ksu_susfs" ] && cp -a "$GITHUB_WORKSPACE/ksu_susfs" susfs4ksu/ || true
               [ -d "$GITHUB_WORKSPACE/ksu_module_susfs" ] && cp -a "$GITHUB_WORKSPACE/ksu_module_susfs" susfs4ksu/ || true
               [ -f "$GITHUB_WORKSPACE/build_ksu_susfs_tool.sh" ] && cp -a "$GITHUB_WORKSPACE/build_ksu_susfs_tool.sh" susfs4ksu/ || true
