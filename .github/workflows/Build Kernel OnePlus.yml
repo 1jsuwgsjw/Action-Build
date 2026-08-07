@@ -1865,7 +1865,6 @@ jobs:
       - name: Build vm_bridge_01 against completed kernel
         if: ${{ env.VM_BRIDGE_BUILD == 'true' }}
         shell: bash
-        env:
         run: |
           # CTF|认证
           set -euo pipefail
@@ -1959,7 +1958,6 @@ jobs:
         if: ${{ env.VM_BRIDGE_BUILD == 'true' }}
         id: vm_bridge_image
         shell: bash
-        env:
         run: |
           # CTF|认证
           set -euo pipefail
