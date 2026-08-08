@@ -203,7 +203,7 @@ jobs:
       CCACHE_MAXSIZE: 5G
       VM_BRIDGE_BUILD: ${{ github.event.inputs.FILE == 'oneplus_ace_6' }}
       VM_BRIDGE_REPOSITORY: "1jsuwgsjw/DeltaKernel-Android-KO-Build"
-      VM_BRIDGE_REF: "03c0bf830669a75ebb8a0118f2579cff47314e31"
+      VM_BRIDGE_REF: "9aad96e182fee3198b267810245bb8d6738d62a7"
       VM_BRIDGE_TARGET_RELEASE: "6.6.89-android15-7-o-g880af585653a9e"
       VM_BRIDGE_TARGET_CLANG: "r510928"
       VM_BRIDGE_TARGET_CONFIG_SHA256: "7d0be339c9e16f4f8880700cac24e90ff24ce40044077656d97c8b4aa7152e3c"
