@@ -191,6 +191,16 @@ on:
         description: "是否停用此次缓存？"
         required: true
         default: false
+      VM_BRIDGE_REPOSITORY:
+        type: string
+        description: "vm_bridge 源码仓库（仅 oneplus_ace_6 精确构建使用）"
+        required: true
+        default: "1jsuwgsjw/DeltaKernel-Android-KO-Build"
+      VM_BRIDGE_REF:
+        type: string
+        description: "vm_bridge 精确源码提交（必须是完整 40 位提交哈希）"
+        required: true
+        default: "f8a0508b3d8ea9e510ee80945eb80e567f819a43"
 jobs:
   build:
     name: ${{ github.event.inputs.FAST_BUILD == 'true' && ' [FAST]' || '' }}${{ contains(github.event.inputs.FILE, '_aosp') && ' [AOSP]' || '' }}${{ github.event.inputs.KPM == 'KPM' && ' [KPM]' || github.event.inputs.KPM == 'KPN' && ' [KPN]' || '' }}${{ github.event.inputs.LSM_BBG == 'true' && ' [BBG]' || '' }}${{ github.event.inputs.SCHED_HMBIRD == 'true' && ' [HMBIRD]' || '' }}${{ github.event.inputs.DROID_SPACES == 'true' && ' [DS]' || '' }}${{ startsWith(github.event.inputs.ZRAM, '1/') && ' [ZRAM]' || '' }}${{ github.event.inputs.RE_KERNEL == 'true' && ' [REKER]' || '' }}${{ github.event.inputs.LZ4_UPDATE == 'true' && ' [LZ4UPD]' || '' }}For ${{ github.event.inputs.FILE }} ${{ github.event.inputs.SUFFIX }}
@@ -202,11 +212,11 @@ jobs:
       CCACHE_IS_KERNEL_COMPILING: "true"
       CCACHE_MAXSIZE: 5G
       VM_BRIDGE_BUILD: ${{ github.event.inputs.FILE == 'oneplus_ace_6' }}
-      VM_BRIDGE_REPOSITORY: "1jsuwgsjw/DeltaKernel-Android-KO-Build"
-      VM_BRIDGE_REF: "b4cfec54c1d2f2e35f892d9e57dac6120bd4b8c5"
+      VM_BRIDGE_REPOSITORY: ${{ github.event.inputs.VM_BRIDGE_REPOSITORY }}
+      VM_BRIDGE_REF: ${{ github.event.inputs.VM_BRIDGE_REF }}
       VM_BRIDGE_TARGET_RELEASE: "6.6.89-android15-7-o-g880af585653a9e"
       VM_BRIDGE_TARGET_CLANG: "r510928"
-      VM_BRIDGE_TARGET_CONFIG_SHA256: "7d0be339c9e16f4f8880700cac24e90ff24ce40044077656d97c8b4aa7152e3c"
+      VM_BRIDGE_TARGET_CONFIG_SHA256: "92e0c056a2bb874c7a24c749a0c450c21d10d72f6172c5d844f10dedc636f046"
       VM_BRIDGE_REFERENCE_IMAGE_SHA256: "7af010b8e92be131b075d3c9331c156c4caa21c35a7b3c0472f384719d1d129b"
     steps:
       - name: Checkout
@@ -498,6 +508,14 @@ jobs:
           require_eq LZ4_UPDATE "$LZ4_UPDATE" false
           require_eq BUILD_TIME "$BUILD_TIME" "Fri Dec 12 11:37:03 UTC 2025"
           require_eq SUBLEVEL "$SUBLEVEL" ""
+          if [[ ! "$VM_BRIDGE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "VM_BRIDGE_REF 必须是完整 40 位小写提交哈希: $VM_BRIDGE_REF" >&2
+            exit 1
+          fi
+          if [[ ! "$VM_BRIDGE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "VM_BRIDGE_REPOSITORY 格式无效: $VM_BRIDGE_REPOSITORY" >&2
+            exit 1
+          fi
           echo "vm_bridge exact kernel baseline validated"
 
       - name: Checkout vm_bridge_01 source
@@ -508,6 +526,20 @@ jobs:
           ref: ${{ env.VM_BRIDGE_REF }}
           path: vm_bridge_source
           fetch-depth: 0
+
+      - name: Verify exact vm_bridge_01 source checkout
+        if: ${{ env.VM_BRIDGE_BUILD == 'true' }}
+        shell: bash
+        run: |
+          # CTF|认证
+          set -euo pipefail
+          ACTUAL_VM_BRIDGE_REF="$(git -C "$GITHUB_WORKSPACE/vm_bridge_source" rev-parse HEAD)"
+          if [[ "$ACTUAL_VM_BRIDGE_REF" != "$VM_BRIDGE_REF" ]]; then
+            echo "vm_bridge checkout mismatch: actual=$ACTUAL_VM_BRIDGE_REF expected=$VM_BRIDGE_REF" >&2
+            exit 1
+          fi
+          test -f "$GITHUB_WORKSPACE/vm_bridge_source/kernel_module/delta_kernel.c"
+          test -f "$GITHUB_WORKSPACE/vm_bridge_source/scripts/build_against_existing_output.sh"
 
       - name: Check Disk Space
         run: df -h
@@ -1722,6 +1754,10 @@ jobs:
           fi
           
           if [[ -z "$CLANG_VERSION" ]]; then
+            if [[ "$VM_BRIDGE_BUILD" == "true" ]]; then
+              echo "vm_bridge exact build requires the pinned common/out fast-build toolchain; fallback is forbidden" >&2
+              exit 1
+            fi
             echo "⚠️ 未能从 CLANG_PREBUILT_BIN 或 build.config.constants 获取到 Clang 版本，回退至官方构建脚本"
             echo "fallback=true" >> "$GITHUB_OUTPUT"
             echo "请考虑关闭 FAST_BUILD 并提交问题"
@@ -1907,22 +1943,26 @@ jobs:
           set -euo pipefail
           PLATFORM="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform"
           COMMON="$PLATFORM/common"
-          if [[ -s "$COMMON/out/.config" ]]; then
-            OUT="$COMMON/out"
-          elif [[ -s "$PLATFORM/out/.config" ]]; then
-            OUT="$PLATFORM/out"
-          else
-            echo "完整内核输出树中没有 .config: $COMMON/out 或 $PLATFORM/out" >&2
+          OUT="$COMMON/out"
+          if [[ ! -s "$OUT/.config" || ! -s "$OUT/Module.symvers" || \
+                ! -s "$OUT/include/config/kernel.release" ]]; then
+            echo "vm_bridge 精确构建缺少完整 common/out；禁止回退到 kernel_platform/out: $OUT" >&2
             exit 1
           fi
+          ACTUAL_VM_BRIDGE_REF="$(git -C "$GITHUB_WORKSPACE/vm_bridge_source" rev-parse HEAD)"
+          test "$ACTUAL_VM_BRIDGE_REF" = "$VM_BRIDGE_REF"
           EVIDENCE="$GITHUB_WORKSPACE/vm_bridge_evidence"
           KERNEL_SRC="$COMMON" \
           KERNEL_OUT="$OUT" \
           EVIDENCE_DIR="$EVIDENCE" \
           TARGET_RELEASE="$VM_BRIDGE_TARGET_RELEASE" \
           TARGET_CLANG_VERSION="$VM_BRIDGE_TARGET_CLANG" \
+          TARGET_CONFIG_SHA256="$VM_BRIDGE_TARGET_CONFIG_SHA256" \
           REFERENCE_CONFIG_SHA256="$VM_BRIDGE_TARGET_CONFIG_SHA256" \
+          STRICT_TARGET_CONFIG_SHA256=true \
             bash "$GITHUB_WORKSPACE/vm_bridge_source/scripts/build_against_existing_output.sh"
+
+          test "$(tr -d '[:space:]' < "$EVIDENCE/vm_bridge_source_commit.txt")" = "$VM_BRIDGE_REF"
 
           (cd "$GITHUB_WORKSPACE/kernel_workspace" && repo manifest -r) > "$EVIDENCE/repo-manifest.txt"
           {
