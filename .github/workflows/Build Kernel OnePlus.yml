@@ -1032,6 +1032,10 @@ jobs:
             VERSION_FULL="v$KSU_VERSION_TAG-$CUSTOM_TAG@$BRANCH_NAME[$USE_HASH]"
           fi
           
+          if [[ "${{ github.event.inputs.FILE }}" == "oneplus_ace_6" && "${{ github.event.inputs.SUSFS_META }}" != "-1" ]]; then
+            VERSION_FULL="${VERSION_FULL}+sehide1"
+          fi
+
           ESC_VERSION_FULL=$(printf '%s' "$VERSION_FULL" | sed 's/[&|\\/]/\\&/g')
           ESC_KSU_VERSION_TAG=$(printf '%s' "$KSU_VERSION_TAG" | sed 's/[&|\\/]/\\&/g')
           
@@ -1283,6 +1287,19 @@ jobs:
             fi
           fi
           
+          # Paired backport: the KSU parser and common callers must use the same signature.
+          if [[ "${{ github.event.inputs.FILE }}" == "oneplus_ace_6" && "${{ github.event.inputs.SUSFS_META }}" != "-1" ]]; then
+            TIMING_PATCH_DIR="$GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches"
+            KSU_TIMING_PATCH="$TIMING_PATCH_DIR/KernelSU/11_fix_selinux_timing_builtin_b88403d2.patch"
+            GKI_TIMING_PATCH="$TIMING_PATCH_DIR/51_fix_selinux_timing_gki_android15_6.6.patch"
+            test "$(git -C ../KernelSU rev-parse HEAD)" = "b88403d2561b6e00dff84a3c851e630c62f57fd0"
+            git -C ../KernelSU apply --check "$KSU_TIMING_PATCH"
+            git apply --check "$GKI_TIMING_PATCH"
+            git -C ../KernelSU apply "$KSU_TIMING_PATCH"
+            git apply "$GKI_TIMING_PATCH"
+            echo "Applied SELinux timing backport sehide1 (KSU parser + GKI callers)"
+          fi
+
           source $REJ_CHECKER
           check_rejects .
           

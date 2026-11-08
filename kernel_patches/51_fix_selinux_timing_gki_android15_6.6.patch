@@ -1,0 +1,126 @@
+Subject: Use live SID and finish the stock transition without reparsing
+
+Target: SukiSU builtin b88403d2, common c1802dd6 with SUSFS b3134f8.
+Backport-of: tiann/KernelSU a85dcbcfc3b09ae410f31aae124d04f3777fdf1c
+Backport-of: SukiSU-Ultra/SukiSU-Ultra 85d3b0483df224f1dcf6f2880b3181d3f2ca4e0f
+Apply both the KSU parser patch and GKI call-site patch together.
+
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index c5760ea..7c5b190 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -111,7 +111,7 @@ struct selinux_state selinux_state;
+ extern struct selinux_policy *backup_sepolicy;
+ extern bool ksu_selinux_hide_running __read_mostly;
+ extern int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
+-                                               u32 *sid, u32 def_sid, gfp_t gfp_flags);
++                                               u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p);
+ #endif // #ifdef CONFIG_KSU_SUSFS
+ 
+ /* SECMARK reference count */
+@@ -6515,8 +6515,10 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
+ #ifdef CONFIG_KSU_SUSFS
+ static int my_setprocattr(const char *name, void *value, size_t size)
+ {
+-	u32 mysid = current_sid(), sid = 0;
+-	int error;
++	struct task_security_struct *tsec;
++	struct cred *new;
++	u32 mysid = current_sid(), sid = 0, backup_sid, ptsid;
++	int error, orig_error = 0;
+ 	char *str = value;
+ 
+ 	// apply to all app uids
+@@ -6538,12 +6540,53 @@ static int my_setprocattr(const char *name, void *value, size_t size)
+ 			size--;
+ 		}
+ 
+-		error = security_context_to_sid_with_policy(backup_sepolicy, str, size, &sid, SECSID_NULL, GFP_KERNEL);
++		/* Parse both policies once; only the live SID may label credentials. */
++		error = security_context_to_sid_with_policy(backup_sepolicy, str, size,
++				&backup_sid, SECSID_NULL, GFP_KERNEL, &sid, &orig_error);
++		if (error || orig_error)
++			return error ?: orig_error;
++	}
++
++	/* Complete the stock current-context transition without parsing again. */
++	new = prepare_creds();
++	if (!new)
++		return -ENOMEM;
++	tsec = selinux_cred(new);
++	error = -EINVAL;
++	if (sid == 0)
++		goto abort_change;
++
++	/* Only allow single threaded processes to change context */
++	if (!current_is_single_threaded()) {
++		error = security_bounded_transition(tsec->sid, sid);
+ 		if (error)
+-			return error;
++			goto abort_change;
+ 	}
+ 
+-	return selinux_setprocattr(name, value, size);
++	/* Check permissions for the transition. */
++	error = avc_has_perm(tsec->sid, sid, SECCLASS_PROCESS,
++			     PROCESS__DYNTRANSITION, NULL);
++	if (error)
++		goto abort_change;
++
++	/* Check for ptracing, and update the task SID if ok.
++	   Otherwise, leave SID unchanged and fail. */
++	ptsid = ptrace_parent_sid();
++	if (ptsid != 0) {
++		error = avc_has_perm(ptsid, sid, SECCLASS_PROCESS,
++				     PROCESS__PTRACE, NULL);
++		if (error)
++			goto abort_change;
++	}
++
++	tsec->sid = sid;
++
++	commit_creds(new);
++	return size;
++
++abort_change:
++	abort_creds(new);
++	return error;
+ }
+ #endif // #ifdef CONFIG_KSU_SUSFS
+ 
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index b07d385..14339ec 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -52,7 +52,7 @@ extern bool ksu_selinux_hide_running __read_mostly;
+ extern bool ksu_selinux_hide_enabled __read_mostly;
+ extern void initialize_fake_status(void);
+ extern int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
+-                                               u32 *sid, u32 def_sid, gfp_t gfp_flags);
++                                               u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p);
+ extern int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext,
+                                                u32 *scontext_len);
+ extern void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
+@@ -734,7 +734,7 @@ static ssize_t my_write_context(struct file *file, char *buf, size_t size)
+ 	if (length)
+ 		goto out;
+ 
+-	length = security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL);
++	length = security_context_to_sid_with_policy(backup_sepolicy, buf, size, &sid, SECSID_NULL, GFP_KERNEL, NULL, NULL);
+ 	if (length)
+ 		goto out;
+ 
+@@ -1038,11 +1038,11 @@ static ssize_t my_write_access(struct file *file, char *buf, size_t size)
+ 	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+ 		goto out;
+ 
+-	length = security_context_to_sid_with_policy(backup_sepolicy, scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL);
++	length = security_context_to_sid_with_policy(backup_sepolicy, scon, strlen(scon), &ssid, SECSID_NULL, GFP_KERNEL, NULL, NULL);
+ 	if (length)
+ 		goto out;
+ 
+-	length = security_context_to_sid_with_policy(backup_sepolicy, tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL);
++	length = security_context_to_sid_with_policy(backup_sepolicy, tcon, strlen(tcon), &tsid, SECSID_NULL, GFP_KERNEL, NULL, NULL);
+ 	if (length)
+ 		goto out;
+ 
