@@ -1,0 +1,243 @@
+Subject: Align builtin's SUSFS callers with our pinned v2.2.0 GKI
+
+Target: builtin 1cfa5734 after 12_align_builtin_1cfa5734_uapi6.patch.
+CI 42534868339 failed because the newer builtin assumes priority UID, NO_SU
+and zygote_next interfaces absent from the pinned SUSFS v2.2.0 source.
+
+Keep the real b88403d2 CONFIG_KSU_SUSFS setresuid/umount implementation,
+including its webview-zygote exclusion; leave the new mount-hide LSM intact.
+Do not invent empty NO_SU/zygote_next helpers or advertise a priority command
+that v2.2 does not implement. Priority calls exist only when its command does.
+The UAPI6 dispatch, scoped su FD, preinit and paired SELinux parser stay intact.
+Call the real GKI AV helper functions directly (no optional-pointer warnings).
+
+diff --git a/kernel/feature/selinux_hide.c b/kernel/feature/selinux_hide.c
+index bfab10e5..5065697a 100644
+--- a/kernel/feature/selinux_hide.c
++++ b/kernel/feature/selinux_hide.c
+@@ -766,8 +766,7 @@ static void __nocfi type_attribute_bounds_av(struct policydb *policydb, struct c
+     avd->allowed &= ~masked;
+ 
+     /* audit masked permissions */
+-    if (security_dump_masked_av_fn)
+-        security_dump_masked_av_fn(policydb, scontext, tcontext, tclass, masked, "bounds");
++    security_dump_masked_av_fn(policydb, scontext, tcontext, tclass, masked, "bounds");
+ }
+ 
+ /*
+@@ -1083,11 +1082,7 @@ void __nocfi security_compute_av_user_with_policy(struct selinux_policy *policy,
+         goto out;
+     }
+ 
+-    if (context_struct_compute_av_fn) {
+-        context_struct_compute_av_fn(policydb, scontext, tcontext, tclass, avd, NULL);
+-    } else {
+-        context_struct_compute_av(policydb, scontext, tcontext, tclass, avd, NULL);
+-    }
++    context_struct_compute_av_fn(policydb, scontext, tcontext, tclass, avd, NULL);
+ out:
+     return;
+ allow:
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+index b14c3609..94903aeb 100644
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -97,15 +97,6 @@ int ksu_handle_execveat_init(struct filename *filename, struct user_arg_ptr *arg
+         return 0;
+     }
+ 
+-    if (likely(!strstr(filename->name, "/app_process") && !strstr(filename->name, "/adbd") && !strstr(filename->name, "/stub_zygote"))) {
+-        pr_info("susfs: mark no sucompat checks for pid: '%d', exec: '%s'\n", current->pid, filename->name);
+-        susfs_set_current_proc_no_su();
+-        // - marking proc umounted here is useless because only zygote spawned processes will umount
+-        //   the sus mounts, tho other susfs features still rely on proc_umounted check, but
+-        //   it is fine to not spoof for init spawned processes.
+-        return 0;
+-    }
+-
+ #ifdef CONFIG_KSU_FEATURE_ADBROOT
+ #ifdef CONFIG_COMPAT
+     if (unlikely(envp_user->is_compat))
+diff --git a/kernel/hook/lsm_hook.c b/kernel/hook/lsm_hook.c
+index cf05225a..4a864b97 100644
+--- a/kernel/hook/lsm_hook.c
++++ b/kernel/hook/lsm_hook.c
+@@ -18,7 +18,6 @@ static int ksu_key_permission(key_ref_t key_ref, const struct cred *cred, unsign
+ 
+ #ifdef CONFIG_KSU_SUSFS
+ extern u32 susfs_zygote_sid;
+-extern u32 susfs_zygote_next_sid;
+ extern void disable_seccomp(void);
+ extern struct work_struct susfs_extra_works;
+ 
+@@ -30,13 +29,16 @@ static inline void ksu_handle_extra_susfs_work(void)
+     schedule_work(&susfs_extra_works);
+ }
+ 
+-static int handle_zygote_setresuid(uid_t ruid) {
++int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
++{
++
++    // We only interest in process spwaned by zygote
++    if (!susfs_is_sid_equal(current_cred(), susfs_zygote_sid))
++        return 0;
++
+     // Check if spawned process is isolated service first, and force to do umount if so
+-    if (is_isolated_process(ruid)) {
+-        susfs_set_current_proc_no_su();
+-        susfs_set_current_proc_umounted();
++    if (is_isolated_process(ruid))
+         goto do_umount;
+-    }
+ 
+     // - Since ksu maanger app uid is excluded in allow_list_arr, so ksu_uid_should_umount(manager_uid)
+     //   will always return true, that's why we need to explicitly check if new_uid belongs to
+@@ -49,22 +51,18 @@ static int handle_zygote_setresuid(uid_t ruid) {
+         return 0;
+     }
+ 
+-    // - Check if spawned process is normal user app and needs to be umounted
+-    // - Now app_profile for webview_zygote is available in KernelSU manager
+-    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid))) {
+-        susfs_set_current_proc_no_su();
+-        susfs_set_current_proc_umounted();
++    // we should not umount for webview zygote
++    if (unlikely(ruid == WEBVIEW_ZYGOTE_UID))
++        return 0;
++
++    // Check if spawned process is normal user app and needs to be umounted
++    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid)))
+         goto do_umount;
+-    }
+ 
+-    // Disable seccomp restriction for root allowed apps since running with "su" will disable seccomp anyway
+-    if (ksu_is_allow_uid_for_current(ruid)) {
++    // - Disable seccomp restriction for root allowed apps since running with "su" will disable seccomp anyway
++    if (ksu_is_allow_uid_for_current(ruid))
+         disable_seccomp();
+-        return 0;
+-    }
+ 
+-    // Process not umounted but also root not allowed
+-    susfs_set_current_proc_no_su();
+     return 0;
+ 
+ do_umount:
+@@ -76,75 +74,10 @@ do_umount:
+         ksu_handle_extra_susfs_work();
+     }
+ 
+-    return 0;
+-}
+-
+-static int handle_zygote_next_setresuid(uid_t ruid) {
+-    // Check if spawned process is isolated service first, and force to do umount if so
+-    if (is_isolated_process(ruid)) {
+-        susfs_set_current_proc_no_su();
+-        susfs_set_current_proc_umounted();
+-        susfs_set_current_proc_umounted_for_zygote_next();
+-        goto do_susfs_work;
+-    }
+-
+-    // - Since ksu maanger app uid is excluded in allow_list_arr, so ksu_uid_should_umount(manager_uid)
+-    //   will always return true, that's why we need to explicitly check if new_uid belongs to
+-    //   ksu manager.
+-    // - Disable seccomp restriction for KSU manager since running with "su" will disable seccomp anyway
+-    if (likely(ksu_is_manager_appid_valid()) && unlikely(is_uid_manager(ruid))) {
+-        disable_seccomp();
+-        pr_info("install fd for manager: %d\n", ruid);
+-        ksu_install_fd();
+-        return 0;
+-    }
+-
+-    // - Check if spawned process is normal user app and needs to be umounted
+-    // - Now app_profile for webview_zygote is available in KernelSU manager
+-    if (likely(is_appuid(ruid) && ksu_uid_should_umount(ruid))) {
+-        susfs_set_current_proc_no_su();
+-        susfs_set_current_proc_umounted();
+-        susfs_set_current_proc_umounted_for_zygote_next();
+-        goto do_susfs_work;
+-    }
+-
+-    // Disable seccomp restriction for root allowed apps since running with "su" will disable seccomp anyway
+-    if (ksu_is_allow_uid_for_current(ruid)) {
+-        disable_seccomp();
+-        return 0;
+-    }
+-
+-    // Process not umounted but also root not allowed
+-    susfs_set_current_proc_no_su();
+-    return 0;
+-
+-do_susfs_work:
+-    {
+-        // Do not umount here as we are in init namespace now
+-
+-        // Handle extra susfs work
+-        ksu_handle_extra_susfs_work();
+-    }
+-
+-    return 0;
+-}
+-
+-int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
+-{
+-    uid_t cur_uid = current_uid().val;
+-
+-    if (cur_uid != 0)
+-        return 0;
+-
+-    // We only interest in process spwaned by zygote or zygote_next
+-    if (susfs_is_sid_equal(current_cred(), susfs_zygote_sid))
+-        return handle_zygote_setresuid(ruid);
+-
+-    if (susfs_is_sid_equal(current_cred(), susfs_zygote_next_sid))
+-        return handle_zygote_next_setresuid(ruid);
++    // Mark current proc as umounted
++    susfs_set_current_proc_umounted();
+ 
+     return 0;
+-
+ }
+ #else
+ static int ksu_task_fix_setuid(struct cred *new, const struct cred *old, int flags)
+diff --git a/kernel/manager/pkg_observer.c b/kernel/manager/pkg_observer.c
+index 9082a6de..0b73b021 100644
+--- a/kernel/manager/pkg_observer.c
++++ b/kernel/manager/pkg_observer.c
+@@ -21,7 +21,9 @@ static void ksu_track_throne_tw_func(struct callback_head *cb)
+         return;
+     track_throne(false);
+     // Renew the priority uid bitmap filter
++#ifdef CMD_SUSFS_SET_PRIORITY_UID_FILTER
+     susfs_parse_priority_app_strings();
++#endif
+ }
+ 
+ // Never scan from the fsnotify handler: fsnotify_mark_srcu and the rename's dir
+@@ -34,7 +36,9 @@ static void ksu_defer_track_throne(void)
+     struct callback_head *cb;
+ 
+     // Renew the getpriority uid bitmap filter
++#ifdef CMD_SUSFS_SET_PRIORITY_UID_FILTER
+     susfs_parse_priority_app_strings();
++#endif
+ 
+     if (!(current->flags & PF_KTHREAD)) {
+         cb = kzalloc(sizeof(*cb), GFP_KERNEL);
+diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+index 9a94512b..9b963b1f 100644
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -474,9 +474,11 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
+             susfs_add_sus_map(arg);
+             return 0;
+ #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
++#ifdef CMD_SUSFS_SET_PRIORITY_UID_FILTER
+         case CMD_SUSFS_SET_PRIORITY_UID_FILTER:
+             susfs_set_priority_uid_filter(arg);
+             return 0;
++#endif
+         case CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING:
+             susfs_set_avc_log_spoofing(arg);
+             return 0;
