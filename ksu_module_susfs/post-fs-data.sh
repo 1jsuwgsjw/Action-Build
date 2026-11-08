@@ -7,6 +7,14 @@ SUSFS_BIN=/data/adb/ksu/bin/ksu_susfs
 
 source ${MODDIR}/utils.sh
 
+# Apply the existing custom uname setting (mode 2); leave other modes unchanged.
+if [ -f /data/adb/susfs4ksu/config.sh ]; then
+    . /data/adb/susfs4ksu/config.sh
+    if [ "$spoof_uname" = "2" ]; then
+        "${SUSFS_BIN}" set_uname "$kernel_version" "$kernel_build"
+    fi
+fi
+
 ## Important Notes:
 ## - The following command can be run at other stages like service.sh, boot-completed.sh etc..,
 ## - This module is just an demo showing how to use ksu_susfs tool to commuicate with kernel
@@ -109,5 +117,3 @@ EOF
 cat <<EOF >/dev/null
 ksu_susfs hide_sus_mnts_for_non_su_procs 1
 EOF
-
-
