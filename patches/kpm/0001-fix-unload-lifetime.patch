@@ -1,0 +1,1205 @@
+diff --git a/kernel/Makefile b/kernel/Makefile
+index bb28a95..2319338 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -10,7 +10,7 @@ AS = $(TARGET_COMPILE)/llvm-as
+ OBJCOPY = $(TARGET_COMPILE)/llvm-objcopy
+ 
+ CFLAGS += -Wall -fno-builtin -std=gnu11 -nostdinc -mgeneral-regs-only
+-CFLAGS += -g
++CFLAGS += -g -mno-outline-atomics
+ CFLAGS += -Wno-unused-function -Wno-return-type -Wno-c23-extensions -Wno-uninitialized
+ CFLAGS += -fno-PIC -fno-asynchronous-unwind-tables -fno-stack-protector -fno-unwind-tables -fno-semantic-interposition -U_FORTIFY_SOURCE -fno-common
+ 
+diff --git a/kernel/base/fphook.c b/kernel/base/fphook.c
+index 2ca0f60..3809e4a 100644
+--- a/kernel/base/fphook.c
++++ b/kernel/base/fphook.c
+@@ -15,29 +15,31 @@ typedef uint64_t (*transit0_func_t)();
+ 
+ uint64_t __attribute__((section(".fp.transit0.text"))) __attribute__((__noinline__)) _fp_transit0()
+ {
+-    uint64_t this_va;
+-    asm volatile("adr %0, ." : "=r"(this_va));
+-    uint32_t *vptr = (uint32_t *)this_va;
+-    while (*--vptr != ARM64_NOP) {
+-    };
+-    vptr--;
+-    fp_hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, fp_hook_chain_t, transit);
++    uint64_t chain_va;
++    asm volatile("mov %0, x16" : "=r"(chain_va));
++    fp_hook_chain_t *hook_chain = (void *)chain_va;
++    uint32_t generation[FP_HOOK_CHAIN_NUM] = {0};
++    int32_t items = __atomic_load_n(&hook_chain->chain_items_max, __ATOMIC_ACQUIRE);
+     hook_fargs0_t fargs;
+     fargs.skip_origin = 0;
+     fargs.chain = hook_chain;
+-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = 0; i < items; i++) {
++        if (!hook_callback_enter(&hook_chain->gate[i])) continue;
++        generation[i] = hook_chain->generation[i];
+         hook_chain0_callback func = hook_chain->befores[i];
+         if (func) func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     if (!fargs.skip_origin) {
+         transit0_func_t origin_func = (transit0_func_t)hook_chain->hook.origin_fp;
+         fargs.ret = origin_func();
+     }
+-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = items - 1; i >= 0; i--) {
++        if (!generation[i] || !hook_callback_enter(&hook_chain->gate[i])) continue;
+         hook_chain0_callback func = hook_chain->afters[i];
+-        if (func) func(&fargs, hook_chain->udata[i]);
++        if (generation[i] == hook_chain->generation[i] && func)
++            func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     return fargs.ret;
+ }
+@@ -49,13 +51,11 @@ typedef uint64_t (*transit4_func_t)(uint64_t, uint64_t, uint64_t, uint64_t);
+ uint64_t __attribute__((section(".fp.transit4.text"))) __attribute__((__noinline__))
+ _fp_transit4(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+ {
+-    uint64_t this_va;
+-    asm volatile("adr %0, ." : "=r"(this_va));
+-    uint32_t *vptr = (uint32_t *)this_va;
+-    while (*--vptr != ARM64_NOP) {
+-    };
+-    vptr--;
+-    fp_hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, fp_hook_chain_t, transit);
++    uint64_t chain_va;
++    asm volatile("mov %0, x16" : "=r"(chain_va));
++    fp_hook_chain_t *hook_chain = (void *)chain_va;
++    uint32_t generation[FP_HOOK_CHAIN_NUM] = {0};
++    int32_t items = __atomic_load_n(&hook_chain->chain_items_max, __ATOMIC_ACQUIRE);
+     hook_fargs4_t fargs;
+     fargs.skip_origin = 0;
+     fargs.arg0 = arg0;
+@@ -63,19 +63,23 @@ _fp_transit4(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+     fargs.arg2 = arg2;
+     fargs.arg3 = arg3;
+     fargs.chain = hook_chain;
+-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = 0; i < items; i++) {
++        if (!hook_callback_enter(&hook_chain->gate[i])) continue;
++        generation[i] = hook_chain->generation[i];
+         hook_chain4_callback func = hook_chain->befores[i];
+         if (func) func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     if (!fargs.skip_origin) {
+         transit4_func_t origin_func = (transit4_func_t)hook_chain->hook.origin_fp;
+         fargs.ret = origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3);
+     }
+-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = items - 1; i >= 0; i--) {
++        if (!generation[i] || !hook_callback_enter(&hook_chain->gate[i])) continue;
+         hook_chain4_callback func = hook_chain->afters[i];
+-        if (func) func(&fargs, hook_chain->udata[i]);
++        if (generation[i] == hook_chain->generation[i] && func)
++            func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     return fargs.ret;
+ }
+@@ -89,13 +93,11 @@ uint64_t __attribute__((section(".fp.transit8.text"))) __attribute__((__noinline
+ _fp_transit8(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6,
+              uint64_t arg7)
+ {
+-    uint64_t this_va;
+-    asm volatile("adr %0, ." : "=r"(this_va));
+-    uint32_t *vptr = (uint32_t *)this_va;
+-    while (*--vptr != ARM64_NOP) {
+-    };
+-    vptr--;
+-    fp_hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, fp_hook_chain_t, transit);
++    uint64_t chain_va;
++    asm volatile("mov %0, x16" : "=r"(chain_va));
++    fp_hook_chain_t *hook_chain = (void *)chain_va;
++    uint32_t generation[FP_HOOK_CHAIN_NUM] = {0};
++    int32_t items = __atomic_load_n(&hook_chain->chain_items_max, __ATOMIC_ACQUIRE);
+     hook_fargs8_t fargs;
+     fargs.skip_origin = 0;
+     fargs.arg0 = arg0;
+@@ -107,20 +109,24 @@ _fp_transit8(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_
+     fargs.arg6 = arg6;
+     fargs.arg7 = arg7;
+     fargs.chain = hook_chain;
+-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = 0; i < items; i++) {
++        if (!hook_callback_enter(&hook_chain->gate[i])) continue;
++        generation[i] = hook_chain->generation[i];
+         hook_chain8_callback func = hook_chain->befores[i];
+         if (func) func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     if (!fargs.skip_origin) {
+         transit8_func_t origin_func = (transit8_func_t)hook_chain->hook.origin_fp;
+         fargs.ret =
+             origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3, fargs.arg4, fargs.arg5, fargs.arg6, fargs.arg7);
+     }
+-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = items - 1; i >= 0; i--) {
++        if (!generation[i] || !hook_callback_enter(&hook_chain->gate[i])) continue;
+         hook_chain8_callback func = hook_chain->afters[i];
+-        if (func) func(&fargs, hook_chain->udata[i]);
++        if (generation[i] == hook_chain->generation[i] && func)
++            func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     return fargs.ret;
+ }
+@@ -135,13 +141,11 @@ uint64_t __attribute__((section(".fp.transit12.text"))) __attribute__((__noinlin
+ _fp_transit12(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6,
+               uint64_t arg7, uint64_t arg8, uint64_t arg9, uint64_t arg10, uint64_t arg11)
+ {
+-    uint64_t this_va;
+-    asm volatile("adr %0, ." : "=r"(this_va));
+-    uint32_t *vptr = (uint32_t *)this_va;
+-    while (*--vptr != ARM64_NOP) {
+-    };
+-    vptr--;
+-    fp_hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, fp_hook_chain_t, transit);
++    uint64_t chain_va;
++    asm volatile("mov %0, x16" : "=r"(chain_va));
++    fp_hook_chain_t *hook_chain = (void *)chain_va;
++    uint32_t generation[FP_HOOK_CHAIN_NUM] = {0};
++    int32_t items = __atomic_load_n(&hook_chain->chain_items_max, __ATOMIC_ACQUIRE);
+     hook_fargs12_t fargs;
+     fargs.skip_origin = 0;
+     fargs.arg0 = arg0;
+@@ -157,20 +161,24 @@ _fp_transit12(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64
+     fargs.arg10 = arg10;
+     fargs.arg11 = arg11;
+     fargs.chain = hook_chain;
+-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = 0; i < items; i++) {
++        if (!hook_callback_enter(&hook_chain->gate[i])) continue;
++        generation[i] = hook_chain->generation[i];
+         hook_chain12_callback func = hook_chain->befores[i];
+         if (func) func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     if (!fargs.skip_origin) {
+         transit12_func_t origin_func = (transit12_func_t)hook_chain->hook.origin_fp;
+         fargs.ret = origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3, fargs.arg4, fargs.arg5, fargs.arg6,
+                                 fargs.arg7, fargs.arg8, fargs.arg9, fargs.arg10, fargs.arg11);
+     }
+-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = items - 1; i >= 0; i--) {
++        if (!generation[i] || !hook_callback_enter(&hook_chain->gate[i])) continue;
+         hook_chain12_callback func = hook_chain->afters[i];
+-        if (func) func(&fargs, hook_chain->udata[i]);
++        if (generation[i] == hook_chain->generation[i] && func)
++            func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     return fargs.ret;
+ }
+@@ -179,42 +187,21 @@ extern void _fp_transit12_end();
+ 
+ static hook_err_t hook_chain_prepare(uint32_t *transit, int32_t argno)
+ {
+-    uint64_t transit_start, transit_end;
+-    switch (argno) {
+-    case 0:
+-        transit_start = (uint64_t)_fp_transit0;
+-        transit_end = (uint64_t)_fp_transit0_end;
+-        break;
+-    case 1:
+-    case 2:
+-    case 3:
+-    case 4:
+-        transit_start = (uint64_t)_fp_transit4;
+-        transit_end = (uint64_t)_fp_transit4_end;
+-        break;
+-    case 5:
+-    case 6:
+-    case 7:
+-    case 8:
+-        transit_start = (uint64_t)_fp_transit8;
+-        transit_end = (uint64_t)_fp_transit8_end;
+-        break;
+-    default:
+-        transit_start = (uint64_t)_fp_transit12;
+-        transit_end = (uint64_t)_fp_transit12_end;
+-        break;
++    uint64_t target, chain = (uint64_t)local_container_of(transit, fp_hook_chain_t, transit);
++    int n = argno == 0 ? 0 : argno <= 4 ? 4 : argno <= 8 ? 8 : 12;
++    switch (n) {
++    case 0: target = (uint64_t)_fp_transit0; break;
++    case 4: target = (uint64_t)_fp_transit4; break;
++    case 8: target = (uint64_t)_fp_transit8; break;
++    case 12: target = (uint64_t)_fp_transit12; break;
++    default: return -HOOK_BAD_ADDRESS;
+     }
+-
+-    int32_t transit_num = (transit_end - transit_start) / 4;
+-
+-    // todo: assert
+-    if (transit_num >= TRANSIT_INST_NUM) return -HOOK_TRANSIT_NO_MEM;
+-
++    /* Reuse KernelPatch's BTI-compatible absolute-return constructor.
++     * x16 carries the chain; RET x17 tail-calls without changing caller LR. */
+     transit[0] = ARM64_BTI_JC;
+-    transit[1] = ARM64_NOP;
+-    for (int i = 0; i < transit_num; i++) {
+-        transit[i + 2] = ((uint32_t *)transit_start)[i];
+-    }
++    transit[1] = 0x580000b0; /* ldr x16, .+20 (chain at words 6/7) */
++    ret_absolute(transit + 2, target);
++    transit[6] = (uint32_t)chain; transit[7] = chain >> 32;
+     return HOOK_NO_ERR;
+ }
+ 
+@@ -239,70 +226,74 @@ KP_EXPORT_SYMBOL(fp_unhook);
+ 
+ hook_err_t fp_hook_wrap(uintptr_t fp_addr, int32_t argno, void *before, void *after, void *udata)
+ {
+-    hook_err_t err = HOOK_NO_ERR;
+     if (is_bad_address((void *)fp_addr)) return -HOOK_BAD_ADDRESS;
++    hook_registry_lock();
+     fp_hook_chain_t *chain = hook_get_mem_from_origin(fp_addr);
+     if (!chain) {
+-        chain = (fp_hook_chain_t *)hook_mem_zalloc(fp_addr, FUNCTION_POINTER_CHAIN);
+-        if (!chain) return -HOOK_NO_MEM;
+-        chain->hook.fp_addr = fp_addr;
+-        chain->hook.replace_addr = (uint64_t)chain->transit;
+-        err = hook_chain_prepare(chain->transit, argno);
+-        if (err) return err;
++        chain = hook_mem_zalloc(fp_addr, FUNCTION_POINTER_CHAIN);
++        if (!chain) { hook_registry_unlock(); return -HOOK_NO_MEM; }
++        for (int i = 0; i < FP_HOOK_CHAIN_NUM; i++) chain->gate[i] = HOOK_GATE_CLOSED;
++        chain->hook.fp_addr = fp_addr; chain->hook.replace_addr = (uint64_t)chain->transit;
++        chain->hook.origin_fp = *(uintptr_t *)fp_addr;
++        hook_err_t err = hook_chain_prepare(chain->transit, argno);
++        if (err) { hook_mem_free(chain); hook_registry_unlock(); return err; }
+         flush_icache_all();
+-        fp_hook(chain->hook.fp_addr, (void *)chain->hook.replace_addr, (void **)&chain->hook.origin_fp);
+     }
+-
++    hook_registry_unlock();
++    int slot = -1;
++    hook_err_t rc = -HOOK_CHAIN_FULL;
++    hook_writer_lock(&chain->writer);
+     for (int i = 0; i < FP_HOOK_CHAIN_NUM; i++) {
+-        if ((before && chain->befores[i] == before) || (after && chain->afters[i] == after)) return -HOOK_DUPLICATED;
+-
+-        // todo: atomic or lock
+-        if (chain->states[i] == CHAIN_ITEM_STATE_EMPTY) {
+-            chain->states[i] = CHAIN_ITEM_STATE_BUSY;
+-            dsb(ish);
+-            chain->udata[i] = udata;
+-            chain->befores[i] = before;
+-            chain->afters[i] = after;
+-            if (i + 1 > chain->chain_items_max) {
+-                chain->chain_items_max = i + 1;
+-            }
+-            dsb(ish);
+-            chain->states[i] = CHAIN_ITEM_STATE_READY;
+-            logkv("Wrap func pointer add: %llx, %llx, %llx successed\n", chain->hook.fp_addr, before, after);
+-            return HOOK_NO_ERR;
++        if ((before && chain->befores[i] == before) || (after && chain->afters[i] == after)) {
++            rc = -HOOK_DUPLICATED; goto out;
+         }
++        if (slot < 0 && chain->states[i] == CHAIN_ITEM_STATE_EMPTY) slot = i;
++    }
++    if (slot < 0) goto out;
++    chain->states[slot] = CHAIN_ITEM_STATE_BUSY;
++    chain->udata[slot] = udata; chain->befores[slot] = before; chain->afters[slot] = after;
++    if (!++chain->generation[slot]) ++chain->generation[slot];
++    chain->states[slot] = CHAIN_ITEM_STATE_READY;
++    __atomic_store_n(&chain->gate[slot], 0, __ATOMIC_RELEASE);
++    if (slot + 1 > chain->chain_items_max)
++        __atomic_store_n(&chain->chain_items_max, slot + 1, __ATOMIC_RELEASE);
++    if (!chain->installed) {
++        uintptr_t backup;
++        fp_hook(fp_addr, (void *)chain->hook.replace_addr, (void **)&backup);
++        chain->installed = 1;
+     }
+-    logkv("Wrap func pointer add: %llx, %llx, %llx failed\n", chain->hook.fp_addr, before, after);
+-    return -HOOK_CHAIN_FULL;
++    rc = HOOK_NO_ERR;
++out:
++    hook_writer_unlock(&chain->writer);
++    return rc;
+ }
+ KP_EXPORT_SYMBOL(fp_hook_wrap);
+ 
+ void fp_hook_unwrap(uintptr_t fp_addr, void *before, void *after)
+ {
+     if (is_bad_address((void *)fp_addr)) return;
+-    fp_hook_chain_t *chain = (fp_hook_chain_t *)hook_get_mem_from_origin(fp_addr);
++    hook_registry_lock();
++    fp_hook_chain_t *chain = hook_get_mem_from_origin(fp_addr);
++    hook_registry_unlock();
+     if (!chain) return;
++    hook_writer_lock(&chain->writer);
+     for (int i = 0; i < FP_HOOK_CHAIN_NUM; i++) {
+-        if (chain->states[i] == CHAIN_ITEM_STATE_READY)
+-            if ((before && chain->befores[i] == before) || (after && chain->afters[i] == after)) {
+-                chain->states[i] = CHAIN_ITEM_STATE_BUSY;
+-                dsb(ish);
+-                chain->udata[i] = 0;
+-                chain->befores[i] = 0;
+-                chain->afters[i] = 0;
+-                dsb(ish);
+-                chain->states[i] = CHAIN_ITEM_STATE_EMPTY;
+-                break;
+-            }
++        if (chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++        if (!((before && chain->befores[i] == before) || (after && chain->afters[i] == after))) continue;
++        hook_callback_close(&chain->gate[i]);
++        chain->udata[i] = chain->befores[i] = chain->afters[i] = 0;
++        chain->states[i] = CHAIN_ITEM_STATE_EMPTY;
++        break;
+     }
+-    logkv("Wrap func pointer remove: %llx, %llx, %llx\n", chain->hook.fp_addr, before, after);
+-
+-    for (int i = 0; i < FP_HOOK_CHAIN_NUM; i++) {
+-        if (chain->states[i] != CHAIN_ITEM_STATE_EMPTY) return;
++    int empty = 1;
++    for (int i = 0; i < FP_HOOK_CHAIN_NUM; i++)
++        if (chain->states[i] != CHAIN_ITEM_STATE_EMPTY) { empty = 0; break; }
++    if (empty && chain->installed) {
++        fp_unhook(fp_addr, (void *)chain->hook.origin_fp);
++        chain->installed = 0;
+     }
+-    fp_unhook(chain->hook.fp_addr, (void *)chain->hook.origin_fp);
+-    // todo: unsafe
+-    hook_mem_free(chain);
+-    logkv("Unwrap func pointer: %llx, %llx, %llx\n", fp_addr, before, after);
++    /* Never recycle a published stub: blocked original syscalls may return to
++     * it later. A reloaded module reuses this same origin, with a new generation. */
++    hook_writer_unlock(&chain->writer);
+ }
+ KP_EXPORT_SYMBOL(fp_hook_unwrap);
+\ No newline at end of file
+diff --git a/kernel/base/hmem.c b/kernel/base/hmem.c
+index 64ec496..faae104 100644
+--- a/kernel/base/hmem.c
++++ b/kernel/base/hmem.c
+@@ -6,6 +6,37 @@
+ #include "hook.h"
+ 
+ #include <stdint.h>
++#include <kallsyms.h>
++
++static uint32_t hook_registry_writer;
++static long (*hook_sleep_timeout)(long);
++static void hook_wait_progress(void)
++{
++    long (*sleep_fn)(long) = __atomic_load_n(&hook_sleep_timeout, __ATOMIC_ACQUIRE);
++    if (!sleep_fn) {
++        sleep_fn = (void *)kallsyms_lookup_name("schedule_timeout_uninterruptible");
++        __atomic_store_n(&hook_sleep_timeout, sleep_fn, __ATOMIC_RELEASE);
++    }
++    /* Sleeping only yields the CPU. The gate count, not a delay, proves exit. */
++    if (sleep_fn) sleep_fn(1);
++    else __asm__ __volatile__("yield" ::: "memory");
++}
++void hook_writer_lock(uint32_t *writer)
++{
++    while (__atomic_exchange_n(writer, 1, __ATOMIC_ACQUIRE)) hook_wait_progress();
++}
++void hook_writer_unlock(uint32_t *writer)
++{
++    __atomic_store_n(writer, 0, __ATOMIC_RELEASE);
++}
++void hook_registry_lock(void) { hook_writer_lock(&hook_registry_writer); }
++void hook_registry_unlock(void) { hook_writer_unlock(&hook_registry_writer); }
++void hook_callback_close(uint32_t *gate)
++{
++    __atomic_fetch_or(gate, HOOK_GATE_CLOSED, __ATOMIC_ACQ_REL);
++    while (__atomic_load_n(gate, __ATOMIC_ACQUIRE) & HOOK_GATE_USERS)
++        hook_wait_progress();
++}
+ 
+ static uint64_t mem_region_start = 0;
+ static uint64_t mem_region_end = 0;
+diff --git a/kernel/base/hmem.h b/kernel/base/hmem.h
+index 0ffe448..847a8fb 100644
+--- a/kernel/base/hmem.h
++++ b/kernel/base/hmem.h
+@@ -8,6 +8,13 @@
+ 
+ #include <stdint.h>
+ 
++/* Registration/removal are process-context operations, not callable from the
++ * callback being removed. Do not hold a kernel spinlock while waiting here. */
++void hook_writer_lock(uint32_t *writer);
++void hook_writer_unlock(uint32_t *writer);
++void hook_callback_close(uint32_t *gate);
++void hook_registry_lock(void);
++void hook_registry_unlock(void);
+ int hook_mem_add(uint64_t start, int32_t size);
+ void *hook_mem_zalloc(uintptr_t origin_addr, enum hook_type type);
+ void hook_mem_free(void *hook_mem);
+diff --git a/kernel/base/hook.c b/kernel/base/hook.c
+index 93cd538..2821d45 100644
+--- a/kernel/base/hook.c
++++ b/kernel/base/hook.c
+@@ -345,29 +345,31 @@ typedef uint64_t (*transit0_func_t)();
+ 
+ uint64_t __attribute__((section(".transit0.text"))) __attribute__((__noinline__)) _transit0()
+ {
+-    uint64_t this_va;
+-    asm volatile("adr %0, ." : "=r"(this_va));
+-    uint32_t *vptr = (uint32_t *)this_va;
+-    while (*--vptr != ARM64_NOP) {
+-    };
+-    vptr--;
+-    hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, hook_chain_t, transit);
++    uint64_t chain_va;
++    asm volatile("mov %0, x16" : "=r"(chain_va));
++    hook_chain_t *hook_chain = (void *)chain_va;
++    uint32_t generation[HOOK_CHAIN_NUM] = {0};
++    int32_t items = __atomic_load_n(&hook_chain->chain_items_max, __ATOMIC_ACQUIRE);
+     hook_fargs0_t fargs;
+     fargs.skip_origin = 0;
+     fargs.chain = hook_chain;
+-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = 0; i < items; i++) {
++        if (!hook_callback_enter(&hook_chain->gate[i])) continue;
++        generation[i] = hook_chain->generation[i];
+         hook_chain0_callback func = hook_chain->befores[i];
+         if (func) func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     if (!fargs.skip_origin) {
+         transit0_func_t origin_func = (transit0_func_t)hook_chain->hook.relo_addr;
+         fargs.ret = origin_func();
+     }
+-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = items - 1; i >= 0; i--) {
++        if (!generation[i] || !hook_callback_enter(&hook_chain->gate[i])) continue;
+         hook_chain0_callback func = hook_chain->afters[i];
+-        if (func) func(&fargs, hook_chain->udata[i]);
++        if (generation[i] == hook_chain->generation[i] && func)
++            func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     return fargs.ret;
+ }
+@@ -379,13 +381,11 @@ typedef uint64_t (*transit4_func_t)(uint64_t, uint64_t, uint64_t, uint64_t);
+ uint64_t __attribute__((section(".transit4.text"))) __attribute__((__noinline__))
+ _transit4(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+ {
+-    uint64_t this_va;
+-    asm volatile("adr %0, ." : "=r"(this_va));
+-    uint32_t *vptr = (uint32_t *)this_va;
+-    while (*--vptr != ARM64_NOP) {
+-    };
+-    vptr--;
+-    hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, hook_chain_t, transit);
++    uint64_t chain_va;
++    asm volatile("mov %0, x16" : "=r"(chain_va));
++    hook_chain_t *hook_chain = (void *)chain_va;
++    uint32_t generation[HOOK_CHAIN_NUM] = {0};
++    int32_t items = __atomic_load_n(&hook_chain->chain_items_max, __ATOMIC_ACQUIRE);
+     hook_fargs4_t fargs;
+     fargs.skip_origin = 0;
+     fargs.arg0 = arg0;
+@@ -393,19 +393,23 @@ _transit4(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+     fargs.arg2 = arg2;
+     fargs.arg3 = arg3;
+     fargs.chain = hook_chain;
+-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = 0; i < items; i++) {
++        if (!hook_callback_enter(&hook_chain->gate[i])) continue;
++        generation[i] = hook_chain->generation[i];
+         hook_chain4_callback func = hook_chain->befores[i];
+         if (func) func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     if (!fargs.skip_origin) {
+         transit4_func_t origin_func = (transit4_func_t)hook_chain->hook.relo_addr;
+         fargs.ret = origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3);
+     }
+-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = items - 1; i >= 0; i--) {
++        if (!generation[i] || !hook_callback_enter(&hook_chain->gate[i])) continue;
+         hook_chain4_callback func = hook_chain->afters[i];
+-        if (func) func(&fargs, hook_chain->udata[i]);
++        if (generation[i] == hook_chain->generation[i] && func)
++            func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     return fargs.ret;
+ }
+@@ -419,13 +423,11 @@ uint64_t __attribute__((section(".transit8.text"))) __attribute__((__noinline__)
+ _transit8(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6,
+           uint64_t arg7)
+ {
+-    uint64_t this_va;
+-    asm volatile("adr %0, ." : "=r"(this_va));
+-    uint32_t *vptr = (uint32_t *)this_va;
+-    while (*--vptr != ARM64_NOP) {
+-    };
+-    vptr--;
+-    hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, hook_chain_t, transit);
++    uint64_t chain_va;
++    asm volatile("mov %0, x16" : "=r"(chain_va));
++    hook_chain_t *hook_chain = (void *)chain_va;
++    uint32_t generation[HOOK_CHAIN_NUM] = {0};
++    int32_t items = __atomic_load_n(&hook_chain->chain_items_max, __ATOMIC_ACQUIRE);
+     hook_fargs8_t fargs;
+     fargs.skip_origin = 0;
+     fargs.arg0 = arg0;
+@@ -437,20 +439,24 @@ _transit8(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t a
+     fargs.arg6 = arg6;
+     fargs.arg7 = arg7;
+     fargs.chain = hook_chain;
+-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = 0; i < items; i++) {
++        if (!hook_callback_enter(&hook_chain->gate[i])) continue;
++        generation[i] = hook_chain->generation[i];
+         hook_chain8_callback func = hook_chain->befores[i];
+         if (func) func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     if (!fargs.skip_origin) {
+         transit8_func_t origin_func = (transit8_func_t)hook_chain->hook.relo_addr;
+         fargs.ret =
+             origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3, fargs.arg4, fargs.arg5, fargs.arg6, fargs.arg7);
+     }
+-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = items - 1; i >= 0; i--) {
++        if (!generation[i] || !hook_callback_enter(&hook_chain->gate[i])) continue;
+         hook_chain8_callback func = hook_chain->afters[i];
+-        if (func) func(&fargs, hook_chain->udata[i]);
++        if (generation[i] == hook_chain->generation[i] && func)
++            func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     return fargs.ret;
+ }
+@@ -465,13 +471,11 @@ uint64_t __attribute__((section(".transit12.text"))) __attribute__((__noinline__
+ _transit12(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5, uint64_t arg6,
+            uint64_t arg7, uint64_t arg8, uint64_t arg9, uint64_t arg10, uint64_t arg11)
+ {
+-    uint64_t this_va;
+-    asm volatile("adr %0, ." : "=r"(this_va));
+-    uint32_t *vptr = (uint32_t *)this_va;
+-    while (*--vptr != ARM64_NOP) {
+-    };
+-    vptr--;
+-    hook_chain_t *hook_chain = local_container_of((uint64_t)vptr, hook_chain_t, transit);
++    uint64_t chain_va;
++    asm volatile("mov %0, x16" : "=r"(chain_va));
++    hook_chain_t *hook_chain = (void *)chain_va;
++    uint32_t generation[HOOK_CHAIN_NUM] = {0};
++    int32_t items = __atomic_load_n(&hook_chain->chain_items_max, __ATOMIC_ACQUIRE);
+     hook_fargs12_t fargs;
+     fargs.skip_origin = 0;
+     fargs.arg0 = arg0;
+@@ -487,20 +491,24 @@ _transit12(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t
+     fargs.arg10 = arg10;
+     fargs.arg11 = arg11;
+     fargs.chain = hook_chain;
+-    for (int32_t i = 0; i < hook_chain->chain_items_max; i++) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = 0; i < items; i++) {
++        if (!hook_callback_enter(&hook_chain->gate[i])) continue;
++        generation[i] = hook_chain->generation[i];
+         hook_chain12_callback func = hook_chain->befores[i];
+         if (func) func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     if (!fargs.skip_origin) {
+         transit12_func_t origin_func = (transit12_func_t)hook_chain->hook.relo_addr;
+         fargs.ret = origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3, fargs.arg4, fargs.arg5, fargs.arg6,
+                                 fargs.arg7, fargs.arg8, fargs.arg9, fargs.arg10, fargs.arg11);
+     }
+-    for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
+-        if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++    for (int32_t i = items - 1; i >= 0; i--) {
++        if (!generation[i] || !hook_callback_enter(&hook_chain->gate[i])) continue;
+         hook_chain12_callback func = hook_chain->afters[i];
+-        if (func) func(&fargs, hook_chain->udata[i]);
++        if (generation[i] == hook_chain->generation[i] && func)
++            func(&fargs, hook_chain->udata[i]);
++        hook_callback_leave(&hook_chain->gate[i]);
+     }
+     return fargs.ret;
+ }
+@@ -663,86 +671,67 @@ KP_EXPORT_SYMBOL(unhook);
+ 
+ static hook_err_t hook_chain_prepare(uint32_t *transit, int32_t argno)
+ {
+-    uint64_t transit_start, transit_end;
+-    switch (argno) {
+-    case 0:
+-        transit_start = (uint64_t)_transit0;
+-        transit_end = (uint64_t)_transit0_end;
+-        break;
+-    case 1:
+-    case 2:
+-    case 3:
+-    case 4:
+-        transit_start = (uint64_t)_transit4;
+-        transit_end = (uint64_t)_transit4_end;
+-        break;
+-    case 5:
+-    case 6:
+-    case 7:
+-    case 8:
+-        transit_start = (uint64_t)_transit8;
+-        transit_end = (uint64_t)_transit8_end;
+-        break;
+-    default:
+-        transit_start = (uint64_t)_transit12;
+-        transit_end = (uint64_t)_transit12_end;
+-        break;
+-    }
+-
+-    int32_t transit_num = (transit_end - transit_start) / 4;
+-    // todo:assert
+-    if (transit_num >= TRANSIT_INST_NUM) return -HOOK_TRANSIT_NO_MEM;
+-
++    uint64_t target, chain = (uint64_t)local_container_of(transit, hook_chain_t, transit);
++    int n = argno == 0 ? 0 : argno <= 4 ? 4 : argno <= 8 ? 8 : 12;
++    switch (n) {
++    case 0: target = (uint64_t)_transit0; break;
++    case 4: target = (uint64_t)_transit4; break;
++    case 8: target = (uint64_t)_transit8; break;
++    case 12: target = (uint64_t)_transit12; break;
++    default: return -HOOK_BAD_ADDRESS;
++    }
++    /* Reuse KernelPatch's BTI-compatible absolute-return constructor.
++     * x16 carries the chain; RET x17 tail-calls without changing caller LR. */
+     transit[0] = ARM64_BTI_JC;
+-    transit[1] = ARM64_NOP;
+-    for (int i = 0; i < transit_num; i++) {
+-        transit[i + 2] = ((uint32_t *)transit_start)[i];
+-    }
++    transit[1] = 0x580000b0; /* ldr x16, .+20 (chain at words 6/7) */
++    ret_absolute(transit + 2, target);
++    transit[6] = (uint32_t)chain; transit[7] = chain >> 32;
+     return HOOK_NO_ERR;
+ }
+ 
+ hook_err_t hook_chain_add(hook_chain_t *chain, void *before, void *after, void *udata)
+ {
++    int slot = -1;
++    hook_err_t rc = -HOOK_CHAIN_FULL;
++    hook_writer_lock(&chain->writer);
+     for (int i = 0; i < HOOK_CHAIN_NUM; i++) {
+-        if ((before && chain->befores[i] == before) || (after && chain->afters[i] == after)) return -HOOK_DUPLICATED;
+-
+-        // todo: atomic or lock
+-        if (chain->states[i] == CHAIN_ITEM_STATE_EMPTY) {
+-            chain->states[i] = CHAIN_ITEM_STATE_BUSY;
+-            dsb(ish);
+-            chain->udata[i] = udata;
+-            chain->befores[i] = before;
+-            chain->afters[i] = after;
+-            if (i + 1 > chain->chain_items_max) {
+-                chain->chain_items_max = i + 1;
+-            }
+-            dsb(ish);
+-            chain->states[i] = CHAIN_ITEM_STATE_READY;
+-            logkv("Wrap chain add: %llx, %llx, %llx successed\n", chain->hook.func_addr, before, after);
+-            return HOOK_NO_ERR;
++        if ((before && chain->befores[i] == before) || (after && chain->afters[i] == after)) {
++            rc = -HOOK_DUPLICATED; goto out;
+         }
+-    }
+-    logkv("Wrap chain add: %llx, %llx, %llx failed\n", chain->hook.func_addr, before, after);
+-    return -HOOK_CHAIN_FULL;
++        if (slot < 0 && chain->states[i] == CHAIN_ITEM_STATE_EMPTY) slot = i;
++    }
++    if (slot < 0) goto out;
++    chain->states[slot] = CHAIN_ITEM_STATE_BUSY;
++    chain->udata[slot] = udata; chain->befores[slot] = before; chain->afters[slot] = after;
++    if (!++chain->generation[slot]) ++chain->generation[slot];
++    chain->states[slot] = CHAIN_ITEM_STATE_READY;
++    __atomic_store_n(&chain->gate[slot], 0, __ATOMIC_RELEASE);
++    if (slot + 1 > chain->chain_items_max)
++        __atomic_store_n(&chain->chain_items_max, slot + 1, __ATOMIC_RELEASE);
++    if (!chain->installed) { hook_chain_install(chain); chain->installed = 1; }
++    rc = HOOK_NO_ERR;
++out:
++    hook_writer_unlock(&chain->writer);
++    return rc;
+ }
+ KP_EXPORT_SYMBOL(hook_chain_add);
+ 
+-void hook_chain_remove(hook_chain_t *chain, void *before, void *after)
++static void hook_chain_remove_locked(hook_chain_t *chain, void *before, void *after)
+ {
+     for (int i = 0; i < HOOK_CHAIN_NUM; i++) {
+-        if (chain->states[i] == CHAIN_ITEM_STATE_READY)
+-            if ((before && chain->befores[i] == before) || (after && chain->afters[i] == after)) {
+-                chain->states[i] = CHAIN_ITEM_STATE_BUSY;
+-                dsb(ish);
+-                chain->udata[i] = 0;
+-                chain->befores[i] = 0;
+-                chain->afters[i] = 0;
+-                dsb(ish);
+-                chain->states[i] = CHAIN_ITEM_STATE_EMPTY;
+-                break;
+-            }
++        if (chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
++        if (!((before && chain->befores[i] == before) || (after && chain->afters[i] == after))) continue;
++        hook_callback_close(&chain->gate[i]);
++        chain->udata[i] = chain->befores[i] = chain->afters[i] = 0;
++        chain->states[i] = CHAIN_ITEM_STATE_EMPTY;
++        break;
+     }
+-    logkv("Wrap chain remove: %llx, %llx, %llx\n", chain->hook.func_addr, before, after);
++}
++void hook_chain_remove(hook_chain_t *chain, void *before, void *after)
++{
++    hook_writer_lock(&chain->writer);
++    hook_chain_remove_locked(chain, before, after);
++    hook_writer_unlock(&chain->writer);
+ }
+ KP_EXPORT_SYMBOL(hook_chain_remove);
+ 
+@@ -750,54 +739,45 @@ KP_EXPORT_SYMBOL(hook_chain_remove);
+ hook_err_t hook_wrap(void *func, int32_t argno, void *before, void *after, void *udata)
+ {
+     if (is_bad_address(func)) return -HOOK_BAD_ADDRESS;
+-    uint64_t faddr = (uint64_t)func;
+-    uint64_t origin = branch_func_addr(faddr);
+-    if (is_bad_address(func)) return -HOOK_BAD_ADDRESS;
+-    hook_chain_t *chain = (hook_chain_t *)hook_get_mem_from_origin(origin);
+-    if (chain) return hook_chain_add(chain, before, after, udata);
+-    chain = (hook_chain_t *)hook_mem_zalloc(origin, INLINE_CHAIN);
+-    if (!chain) return -HOOK_NO_MEM;
+-    chain->chain_items_max = 0;
+-    hook_t *hook = &chain->hook;
+-    hook->func_addr = faddr;
+-    hook->origin_addr = origin;
+-    hook->replace_addr = (uint64_t)chain->transit;
+-    hook->relo_addr = (uint64_t)hook->relo_insts;
+-    logkv("Wrap func: %llx, origin: %llx, replace: %llx, relocate: %llx, chain: %llx\n", hook->func_addr,
+-          hook->origin_addr, hook->replace_addr, hook->relo_addr, chain);
+-    hook_err_t err = hook_prepare(hook);
+-    if (err) goto err;
+-    err = hook_chain_prepare(chain->transit, argno);
+-    if (err) goto err;
+-    err = hook_chain_add(chain, before, after, udata);
+-    if (err) goto err;
+-    hook_chain_install(chain);
+-    logkv("Wrap func: %llx succsseed\n", hook->func_addr);
+-    return HOOK_NO_ERR;
+-err:
+-    hook_mem_free(chain);
+-    logkv("Wrap func: %llx failed, err: %d\n", hook->func_addr, err);
+-    return err;
++    hook_err_t err = HOOK_NO_ERR;
++    hook_registry_lock();
++    uint64_t origin = branch_func_addr((uint64_t)func);
++    hook_chain_t *chain = hook_get_mem_from_origin(origin);
++    if (!chain) {
++        chain = hook_mem_zalloc(origin, INLINE_CHAIN);
++        if (!chain) { hook_registry_unlock(); return -HOOK_NO_MEM; }
++        for (int i = 0; i < HOOK_CHAIN_NUM; i++) chain->gate[i] = HOOK_GATE_CLOSED;
++        hook_t *h = &chain->hook;
++        h->func_addr = (uint64_t)func; h->origin_addr = origin;
++        h->replace_addr = (uint64_t)chain->transit; h->relo_addr = (uint64_t)h->relo_insts;
++        err = hook_prepare(h);
++        if (!err) err = hook_chain_prepare(chain->transit, argno);
++        if (err) { hook_mem_free(chain); hook_registry_unlock(); return err; }
++    }
++    hook_registry_unlock();
++    return hook_chain_add(chain, before, after, udata);
+ }
+ KP_EXPORT_SYMBOL(hook_wrap);
+ 
+ void hook_unwrap_remove(void *func, void *before, void *after, int remove)
+ {
+     if (is_bad_address(func)) return;
+-    uint64_t faddr = (uint64_t)func;
+-    uint64_t origin = branch_func_addr(faddr);
+-    if (is_bad_address(func)) return;
+-    hook_chain_t *chain = (hook_chain_t *)hook_get_mem_from_origin(origin);
++    hook_registry_lock();
++    uint64_t origin = branch_func_addr((uint64_t)func);
++    hook_chain_t *chain = hook_get_mem_from_origin(origin);
++    hook_registry_unlock();
+     if (!chain) return;
+-    hook_chain_remove(chain, before, after);
+-    if (!remove) return;
+-    // todo:
+-    for (int i = 0; i < HOOK_CHAIN_NUM; i++) {
+-        if (chain->states[i] != CHAIN_ITEM_STATE_EMPTY) return;
+-    }
+-    hook_chain_uninstall(chain);
+-    // todo: unsafe
+-    hook_mem_free(chain);
+-    logkv("Unwrap func: %llx\n", func);
++    hook_writer_lock(&chain->writer);
++    hook_chain_remove_locked(chain, before, after);
++    if (remove && chain->installed) {
++        int empty = 1;
++        for (int i = 0; i < HOOK_CHAIN_NUM; i++)
++            if (chain->states[i] != CHAIN_ITEM_STATE_EMPTY) { empty = 0; break; }
++        if (empty) { hook_chain_uninstall(chain); chain->installed = 0; }
++    }
++    /* A CPU may already have fetched the stub or be inside the origin. Keep
++     * this one chain per origin until reboot, and reuse it on re-registration.
++     * Module callbacks are gone and drained; the kernel hook is restored. */
++    hook_writer_unlock(&chain->writer);
+ }
+ KP_EXPORT_SYMBOL(hook_unwrap_remove);
+diff --git a/kernel/include/hook.h b/kernel/include/hook.h
+index 54ef3c6..0a7b1d0 100644
+--- a/kernel/include/hook.h
++++ b/kernel/include/hook.h
+@@ -213,6 +213,11 @@ typedef struct _hook_chain
+     void *befores[HOOK_CHAIN_NUM];
+     void *afters[HOOK_CHAIN_NUM];
+     uint32_t transit[TRANSIT_INST_NUM];
++    /* Resident admission gates: high bit closes entry, low bits pin callbacks. */
++    uint32_t gate[HOOK_CHAIN_NUM];
++    uint32_t generation[HOOK_CHAIN_NUM];
++    uint32_t writer;
++    int installed;
+ } hook_chain_t __attribute__((aligned(8)));
+ 
+ typedef struct
+@@ -231,8 +236,32 @@ typedef struct _fphook_chain
+     void *befores[FP_HOOK_CHAIN_NUM];
+     void *afters[FP_HOOK_CHAIN_NUM];
+     uint32_t transit[TRANSIT_INST_NUM];
++    /* Resident admission gates: high bit closes entry, low bits pin callbacks. */
++    uint32_t gate[FP_HOOK_CHAIN_NUM];
++    uint32_t generation[FP_HOOK_CHAIN_NUM];
++    uint32_t writer;
++    int installed;
+ } fp_hook_chain_t __attribute__((aligned(8)));
+ 
++#define HOOK_GATE_CLOSED (1U << 31)
++#define HOOK_GATE_USERS (HOOK_GATE_CLOSED - 1U)
++
++/* A single atomic word closes the read-before-increment race. These helpers
++ * run in resident KernelPatch text, BEFORE a module function is fetched. */
++static __attribute__((always_inline)) inline int hook_callback_enter(uint32_t *gate)
++{
++    uint32_t value = __atomic_load_n(gate, __ATOMIC_RELAXED);
++    do {
++        if (value & HOOK_GATE_CLOSED) return 0;
++    } while (!__atomic_compare_exchange_n(gate, &value, value + 1, 1,
++                                          __ATOMIC_ACQUIRE, __ATOMIC_RELAXED));
++    return 1;
++}
++static __attribute__((always_inline)) inline void hook_callback_leave(uint32_t *gate)
++{
++    __atomic_fetch_sub(gate, 1, __ATOMIC_RELEASE);
++}
++
+ static inline int is_bad_address(void *addr)
+ {
+     return ((uint64_t)addr & 0x8000000000000000) != 0x8000000000000000;
+diff --git a/kernel/patch/include/module.h b/kernel/patch/include/module.h
+index 842d5e6..cfe4541 100644
+--- a/kernel/patch/include/module.h
++++ b/kernel/patch/include/module.h
+@@ -51,6 +51,8 @@ struct module
+     void *start;
+ 
+     struct list_head list;
++    unsigned int users;
++    enum { MODULE_INITIALIZING, MODULE_LIVE, MODULE_UNLOADING, MODULE_FAILED } state;
+ };
+ 
+ long load_module(const void *data, int len, const char *args, const char *event, void *__user reserved);
+diff --git a/kernel/patch/module/module.c b/kernel/patch/module/module.c
+index c0fe197..75f2ade 100644
+--- a/kernel/patch/module/module.c
++++ b/kernel/patch/module/module.c
+@@ -396,6 +396,22 @@ static int elf_header_check(struct load_info *info)
+ struct module modules = { 0 };
+ static spinlock_t module_lock;
+ 
++static struct module *module_get(const char *name, long *rc)
++{
++    unsigned long flags = spin_lock_irqsave(&module_lock);
++    struct module *mod = find_module(name);
++    *rc = !mod ? -ENOENT : mod->state != MODULE_LIVE ? -EBUSY : 0;
++    if (!*rc) mod->users++;
++    spin_unlock_irqrestore(&module_lock, flags);
++    return *rc ? 0 : mod;
++}
++static void module_put(struct module *mod)
++{
++    unsigned long flags = spin_lock_irqsave(&module_lock);
++    mod->users--;
++    spin_unlock_irqrestore(&module_lock, flags);
++}
++
+ long load_module(const void *data, int len, const char *args, const char *event, void *__user reserved)
+ {
+     struct load_info load_info = { .len = len, .hdr = data };
+@@ -405,12 +421,6 @@ long load_module(const void *data, int len, const char *args, const char *event,
+     if ((rc = elf_header_check(info))) goto out;
+     if ((rc = setup_load_info(info))) goto out;
+ 
+-    if (find_module(info->info.name)) {
+-        logkfd("%s exist\n", info->info.name);
+-        rc = -EEXIST;
+-        goto out;
+-    }
+-
+     struct module *mod = (struct module *)vmalloc(sizeof(struct module));
+     if (!mod) return -ENOMEM;
+     memset(mod, 0, sizeof(struct module));
+@@ -433,15 +443,33 @@ long load_module(const void *data, int len, const char *args, const char *event,
+ 
+     flush_icache_all();
+ 
++    unsigned long flags = spin_lock_irqsave(&module_lock);
++    if (find_module(mod->info.name)) {
++        spin_unlock_irqrestore(&module_lock, flags);
++        rc = -EEXIST;
++        goto free;
++    }
++    mod->state = MODULE_INITIALIZING;
++    list_add_tail(&mod->list, &modules.list);
++    spin_unlock_irqrestore(&module_lock, flags);
+     rc = (*mod->init)(mod->args, event, reserved);
+-
+     if (!rc) {
++        flags = spin_lock_irqsave(&module_lock);
++        mod->state = MODULE_LIVE;
++        spin_unlock_irqrestore(&module_lock, flags);
+         logkfi("[%s] succeed with [%s] \n", mod->info.name, args);
+-        list_add_tail(&mod->list, &modules.list);
+         goto out;
+-    } else {
+-        logkfi("[%s] failed with [%s] error: %d, try exit ...\n", mod->info.name, args, rc);
+-        (*mod->exit)(reserved);
++    }
++    /* Failed init can also leave hooks owned by this image. Respect cleanup
++     * refusal, retain the image, and allow an explicit later unload to retry. */
++    long exit_rc = (*mod->exit)(reserved);
++    flags = spin_lock_irqsave(&module_lock);
++    if (exit_rc) mod->state = MODULE_FAILED;
++    else list_del(&mod->list);
++    spin_unlock_irqrestore(&module_lock, flags);
++    if (exit_rc) {
++        logkfe("[%s] init failed %ld, exit refused %ld; image retained\n", mod->info.name, rc, exit_rc);
++        goto out;
+     }
+ 
+ free:
+@@ -457,30 +485,31 @@ out:
+ long unload_module(const char *name, void *__user reserved)
+ {
+     if (!name) return -EINVAL;
+-    logkfe("name: %s\n", name);
+-
+-    rcu_read_lock();
+-    long rc = 0;
+-
++    unsigned long flags = spin_lock_irqsave(&module_lock);
+     struct module *mod = find_module(name);
+-    if (!mod) {
+-        rc = -ENOENT;
+-        goto out;
++    if (!mod) { spin_unlock_irqrestore(&module_lock, flags); return -ENOENT; }
++    if (mod->users || (mod->state != MODULE_LIVE && mod->state != MODULE_FAILED)) {
++        spin_unlock_irqrestore(&module_lock, flags); return -EBUSY;
++    }
++    int previous = mod->state;
++    mod->state = MODULE_UNLOADING;
++    spin_unlock_irqrestore(&module_lock, flags);
++    /* No list/RCU lock across module teardown: draining callbacks can sleep. */
++    long rc = (*mod->exit)(reserved);
++    flags = spin_lock_irqsave(&module_lock);
++    if (rc) mod->state = previous;
++    else list_del(&mod->list);
++    spin_unlock_irqrestore(&module_lock, flags);
++    if (rc) {
++        logkfe("unload %s refused: %ld; image retained\n", name, rc);
++        return rc;
+     }
+-    list_del(&mod->list);
+-    rc = (*mod->exit)(reserved);
+-
+     if (mod->args) kvfree(mod->args);
+     if (mod->ctl_args) kvfree(mod->ctl_args);
+-
+     kp_free_exec(mod->start);
+     kvfree(mod);
+-
+-    logkfi("name: %s, rc: %d\n", name, rc);
+-
+-out:
+-    rcu_read_unlock();
+-    return rc;
++    logkfi("unload %s complete\n", name);
++    return 0;
+ }
+ 
+ long load_module_path(const char *path, const char *args, void *__user reserved)
+@@ -525,68 +554,31 @@ out:
+ 
+ long module_control0(const char *name, const char *ctl_args, char *__user out_msg, int outlen)
+ {
+-    if (!name || !ctl_args) return -EINVAL;
+-    int args_len = strlen(ctl_args);
+-    if (args_len <= 0) return -EINVAL;
+-
+-    logkfi("name %s, args: %s\n", name, ctl_args);
+-
+-    long rc = 0;
+-    rcu_read_lock();
+-
+-    struct module *mod = find_module(name);
+-    if (!mod) {
+-        rc = -ENOENT;
+-        goto out;
+-    }
+-
+-    if (!*mod->ctl0) {
+-        logkfe("no ctl0\n");
+-        rc = -ENOSYS;
+-        goto out;
+-    }
+-
+-    if (mod->ctl_args) kvfree(mod->ctl_args);
+-
+-    mod->ctl_args = vmalloc(args_len + 1);
+-    if (!mod->ctl_args) {
+-        rc = -ENOMEM;
+-        goto out;
+-    }
+-
+-    strcpy(mod->ctl_args, ctl_args);
+-
+-    rc = (*mod->ctl0)(mod->ctl_args, out_msg, outlen);
+-
+-    logkfi("name: %s, rc: %d\n", name, rc);
++    if (!name || !ctl_args || !*ctl_args) return -EINVAL;
++    long rc;
++    struct module *mod = module_get(name, &rc);
++    if (!mod) return rc;
++    char *args = 0;
++    if (!mod->ctl0 || !*mod->ctl0) { rc = -ENOSYS; goto out; }
++    args = vmalloc(strlen(ctl_args) + 1);
++    if (!args) { rc = -ENOMEM; goto out; }
++    strcpy(args, ctl_args);
++    /* Per-call argument storage prevents one control request freeing another's. */
++    rc = (*mod->ctl0)(args, out_msg, outlen);
+ out:
+-    rcu_read_unlock();
++    if (args) kvfree(args);
++    module_put(mod);
+     return rc;
+ }
+ 
+ long module_control1(const char *name, void *a1, void *a2, void *a3)
+ {
+-    logkfi("name %s, a1: %llx, a2: %llx, a3: %llx\n", name, a1, a2, a3);
+-    long rc = 0;
+-    rcu_read_lock();
+-
+-    struct module *mod = find_module(name);
+-    if (!mod) {
+-        rc = -ENOENT;
+-        goto out;
+-    }
+-
+-    if (!*mod->ctl1) {
+-        logkfe("no ctl1\n");
+-        rc = -ENOSYS;
+-        goto out;
+-    }
+-
+-    rc = (*mod->ctl1)(a1, a2, a3);
+-
+-    logkfi("name: %s, rc: %d\n", name, rc);
+-out:
+-    rcu_read_unlock();
++    if (!name) return -EINVAL;
++    long rc;
++    struct module *mod = module_get(name, &rc);
++    if (!mod) return rc;
++    rc = mod->ctl1 && *mod->ctl1 ? (*mod->ctl1)(a1, a2, a3) : -ENOSYS;
++    module_put(mod);
+     return rc;
+ }
+ 
+@@ -604,7 +596,7 @@ struct module *find_module(const char *name)
+ 
+ int get_module_nums()
+ {
+-    rcu_read_lock();
++    unsigned long flags = spin_lock_irqsave(&module_lock);
+ 
+     struct module *pos;
+     int n = 0;
+@@ -612,7 +604,7 @@ int get_module_nums()
+     {
+         n++;
+     }
+-    rcu_read_unlock();
++    spin_unlock_irqrestore(&module_lock, flags);
+ 
+     logkfd("%d\n", n);
+     return n;
+@@ -620,7 +612,7 @@ int get_module_nums()
+ 
+ int list_modules(char *out_names, int size)
+ {
+-    rcu_read_lock();
++    unsigned long flags = spin_lock_irqsave(&module_lock);
+ 
+     struct module *pos;
+     int off = 0;
+@@ -630,17 +622,17 @@ int list_modules(char *out_names, int size)
+     }
+     if (off > 0) out_names[off - 1] = '\0';
+ 
+-    rcu_read_unlock();
++    spin_unlock_irqrestore(&module_lock, flags);
+     return off;
+ }
+ 
+ int get_module_info(const char *name, char *out_info, int size)
+ {
+     if (size <= 0) return 0;
+-    rcu_read_lock();
++    unsigned long flags = spin_lock_irqsave(&module_lock);
+ 
+     struct module *mod = find_module(name);
+-    if (!mod) return -ENOENT;
++    if (!mod) { spin_unlock_irqrestore(&module_lock, flags); return -ENOENT; }
+ 
+     int sz = snprintf(out_info, size - 1,
+                       "name=%s\n"
+@@ -655,7 +647,7 @@ int get_module_info(const char *name, char *out_info, int size)
+     if (sz > 0) out_info[sz - 1] = '\0';
+     // logkfd("%s", out_info);
+ 
+-    rcu_read_unlock();
++    spin_unlock_irqrestore(&module_lock, flags);
+     return sz;
+ }
+ 
+@@ -663,4 +655,5 @@ void module_init()
+ {
+     INIT_LIST_HEAD(&modules.list);
+     spin_lock_init(&module_lock);
++    log_boot("KPM unload lifetime: v1\n");
+ }
+\ No newline at end of file
