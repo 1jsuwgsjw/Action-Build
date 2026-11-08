@@ -202,6 +202,9 @@ jobs:
       CCACHE_IS_KERNEL_COMPILING: "true"
       CCACHE_MAXSIZE: 5G
       VM_BRIDGE_BUILD: ${{ github.event.inputs.FILE == 'oneplus_ace_6' }}
+      KSU_BUILTIN_REV: "1cfa57340590971cba7521ed536da8ebbedc5f0a"
+      KSU_USERSPACE_REV: "d7d042816b82b200c25b3a93dcc158ba0307cabf"
+      KSU_MANAGER_RUN: "42480373896"
       VM_BRIDGE_REPOSITORY: "1jsuwgsjw/DeltaKernel-Android-KO-Build"
       VM_BRIDGE_REF: "b4cfec54c1d2f2e35f892d9e57dac6120bd4b8c5"
       VM_BRIDGE_TARGET_RELEASE: "6.6.89-android15-7-o-g880af585653a9e"
@@ -926,8 +929,8 @@ jobs:
           # 解析字段：分支 / 自定义标识 / 手动 hash
           IFS='/' read -r BRANCH_NAME CUSTOM_TAG MANUAL_HASH <<< "$KSU_META"
           if [[ "$BUILD_VM_BRIDGE" == "true" ]]; then
-            MANUAL_HASH="b88403d2561b6e00dff84a3c851e630c62f57fd0"
-            SETUP_REF="7cd3be6187d464784ba96644b44fad085477d753"
+            MANUAL_HASH="$KSU_BUILTIN_REV"
+            SETUP_REF="$KSU_BUILTIN_REV"
           else
             SETUP_REF="$MANAGER_BRANCH"
           fi
@@ -1007,7 +1010,7 @@ jobs:
           PY
           
           if [[ "$BUILD_VM_BRIDGE" == "true" ]]; then
-            KSU_VERSION_TAG="4.1.3"
+            KSU_VERSION_TAG="UAPI6"
           else
             KSU_VERSION_TAG=$(curl -fsSL https://api.github.com/repos/SukiSU-Ultra/SukiSU-Ultra/releases/latest \
               | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
@@ -1026,7 +1029,9 @@ jobs:
           else
             USE_HASH="$GIT_HASH"
           fi
-          if [[ -z "$CUSTOM_TAG" ]]; then
+          if [[ "$BUILD_VM_BRIDGE" == "true" ]]; then
+            VERSION_FULL="builtin-uapi6-${CUSTOM_TAG:-local}[$USE_HASH]"
+          elif [[ -z "$CUSTOM_TAG" ]]; then
             VERSION_FULL="v$KSU_VERSION_TAG-$USE_HASH@$BRANCH_NAME"
           else
             VERSION_FULL="v$KSU_VERSION_TAG-$CUSTOM_TAG@$BRANCH_NAME[$USE_HASH]"
@@ -1063,10 +1068,20 @@ jobs:
           
           KSU_COUNT_REF="${MANUAL_HASH:-$MANAGER_BRANCH}"
           KSU_VERSION=$(expr $(git rev-list --count "$KSU_COUNT_REF" 2>/dev/null || echo 13000) + 37185)
+          if [[ "$BUILD_VM_BRIDGE" == "true" ]]; then
+            # Count the actual pinned builtin, not online main or the manager's version.
+            KSU_VERSION=$(( $(git rev-list --count "$MANUAL_HASH") + 37185 ))
+            sed -i -E \
+              -e "s|^REPO_BRANCH[[:space:]]*:=.*|REPO_BRANCH := $MANUAL_HASH|" \
+              -e 's|^KSU_GITHUB_VER[[:space:]]*:=.*|KSU_GITHUB_VER :=|' \
+              -e 's|^GITHUB_COMMITS[[:space:]]*:=.*|GITHUB_COMMITS :=|' \
+              -e "s|^KSU_VERSION[[:space:]]*:=.*|KSU_VERSION := $KSU_VERSION|" kernel/Makefile
+            grep -q 'KERNEL_SU_UAPI_VERSION, 6' kernel/include/uapi/supercall.h
+          fi
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           
           echo "::group::最终 Makefile 中版本信息及部分调试结果预览"
-          grep -nE '^(REPO_OWNER|REPO_NAME|REPO_BRANCH|KSU_VERSION_API|KSU_VERSION_FULL|VERSION_TAG|GIT_BIN|CURL_BIN)' kernel/Makefile
+          grep -nE '^(REPO_OWNER|REPO_NAME|REPO_BRANCH|KSU_VERSION|VERSION_TAG|GIT_BIN|CURL_BIN)' kernel/Makefile
           echo "::endgroup::"
           
       - name: Apply Patches SukiSU Ultra
@@ -1293,14 +1308,17 @@ jobs:
           # Paired backport: the KSU parser and common callers must use the same signature.
           if [[ "${{ github.event.inputs.FILE }}" == "oneplus_ace_6" && "${{ github.event.inputs.SUSFS_META }}" != "-1" ]]; then
             TIMING_PATCH_DIR="$GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches"
-            KSU_TIMING_PATCH="$TIMING_PATCH_DIR/KernelSU/11_fix_selinux_timing_builtin_b88403d2.patch"
+            KSU_TIMING_PATCH="$TIMING_PATCH_DIR/KernelSU/12_align_builtin_1cfa5734_uapi6.patch"
+            GKI_EXEC_PATCH="$TIMING_PATCH_DIR/52_align_builtin_uapi6_exec_gki_android15_6.6.patch"
             GKI_TIMING_PATCH="$TIMING_PATCH_DIR/51_fix_selinux_timing_gki_android15_6.6.patch"
-            test "$(git -C ../KernelSU rev-parse HEAD)" = "b88403d2561b6e00dff84a3c851e630c62f57fd0"
+            test "$(git -C ../KernelSU rev-parse HEAD)" = "$KSU_BUILTIN_REV"
             git -C ../KernelSU apply --check "$KSU_TIMING_PATCH"
             git apply --check "$GKI_TIMING_PATCH"
+            git apply --check "$GKI_EXEC_PATCH"
             git -C ../KernelSU apply "$KSU_TIMING_PATCH"
             git apply "$GKI_TIMING_PATCH"
-            echo "Applied SELinux timing backport sehide1 (KSU parser + GKI callers)"
+            git apply "$GKI_EXEC_PATCH"
+            echo "Applied builtin UAPI6 adapters: upstream paired SELinux parser + sehide1 GKI callers, static-key sucompat, scoped su FD and preinit"
           fi
 
           source $REJ_CHECKER
@@ -1904,6 +1922,10 @@ jobs:
           
           make O=out "${MAKE_ARGS[@]}" olddefconfig --no-print-directory
           sync_susfs_out_config
+          if [[ "$VM_BRIDGE_BUILD" == "true" ]]; then
+            # The builtin preinit runner needs generated kernel UAPI headers.
+            make O=out "${MAKE_ARGS[@]}" headers --no-print-directory
+          fi
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
           ccache -s
           
@@ -1944,6 +1966,16 @@ jobs:
           REFERENCE_CONFIG_SHA256="$VM_BRIDGE_TARGET_CONFIG_SHA256" \
             bash "$GITHUB_WORKSPACE/vm_bridge_source/scripts/build_against_existing_output.sh"
 
+          test -s "$OUT/drivers/kernelsu/preinit/runner.elf"
+          test "$(git -C "$PLATFORM/KernelSU" rev-parse HEAD)" = "$KSU_BUILTIN_REV"
+          git -C "$PLATFORM/KernelSU" diff --binary > "$EVIDENCE/kernelsu-applied.patch"
+          {
+            printf 'builtin_commit=%s\nuserspace_commit=%s\nmanager_run=%s\n' \
+              "$KSU_BUILTIN_REV" "$KSU_USERSPACE_REV" "$KSU_MANAGER_RUN"
+            grep -E '^KSU_VERSION[ _].*:=' "$PLATFORM/KernelSU/kernel/Makefile"
+            grep 'KERNEL_SU_UAPI_VERSION, 6' "$PLATFORM/KernelSU/kernel/include/uapi/supercall.h"
+            sha256sum "$OUT/drivers/kernelsu/preinit/runner.elf"
+          } > "$EVIDENCE/ksu-uapi6-build.txt"
           (cd "$GITHUB_WORKSPACE/kernel_workspace" && repo manifest -r) > "$EVIDENCE/repo-manifest.txt"
           {
             printf 'common=%s\n' "$(git -C "$PLATFORM/common" rev-parse HEAD)"
@@ -2044,7 +2076,11 @@ jobs:
           cd "${OUT_DIR}"
           if [ "${{ github.event.inputs.KPM }}" = "KPM" ]; then
             LOADER_OUT="${GITHUB_WORKSPACE}/kpm-unload-lifetime"
-            bash "${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches/kpm/build_loader.sh"               "${GITHUB_WORKSPACE}/kernel_workspace/KernelPatch-unload-lifetime" "$LOADER_OUT"
+            LOADER_SOURCE="${GITHUB_WORKSPACE}/kernel_workspace/susfs-snapshot-source"
+            test "$(git -C "$LOADER_SOURCE" rev-parse HEAD)" = "$GITHUB_SHA"
+            bash "$LOADER_SOURCE/patches/kpm/build_loader.sh" \
+              "${GITHUB_WORKSPACE}/kernel_workspace/KernelPatch-unload-lifetime" "$LOADER_OUT"
+            printf 'action_build_commit=%s\n' "$GITHUB_SHA" >> "$LOADER_OUT/build-info.txt"
             "$LOADER_OUT/kptools" -p -s 123 -i ./Image -k "$LOADER_OUT/kpimg" -o ./oImage
             sha256sum ./oImage > "$LOADER_OUT/patched-Image.sha256"
           else
@@ -2206,8 +2242,8 @@ jobs:
           wget -O ksu_module_susfs_1.5.2+_Release.zip https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip
           cp ksu_module_susfs_1.5.2+_Release.zip ./AnyKernel3/
 
-      - name: Download Latest SukiSU-Ultra APK from CI
-        continue-on-error: true
+      - name: Download matching SukiSU-Ultra APK from CI
+        continue-on-error: ${{ env.VM_BRIDGE_BUILD != 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -2217,7 +2253,13 @@ jobs:
           echo "Using branch: $MANAGER_BRANCH"
           echo "Downloading artifact: $MANAGER_ARTIFACT"
 
-          run_id=$(gh api "repos/SukiSU-Ultra/SukiSU-Ultra/actions/workflows/build-manager.yml/runs?branch=$MANAGER_BRANCH&status=success&per_page=1" --jq '.workflow_runs[0].id' || echo "")
+          if [[ "$VM_BRIDGE_BUILD" == "true" ]]; then
+            run_id="$KSU_MANAGER_RUN"
+            MANAGER_ARTIFACT="Manager"
+            test "$(gh api "repos/SukiSU-Ultra/SukiSU-Ultra/actions/runs/$run_id" --jq '.head_sha')" = "$KSU_USERSPACE_REV"
+          else
+            run_id=$(gh api "repos/SukiSU-Ultra/SukiSU-Ultra/actions/workflows/build-manager.yml/runs?branch=$MANAGER_BRANCH&status=success&per_page=1" --jq '.workflow_runs[0].id' || echo "")
+          fi
 
           if [[ -z "$run_id" ]]; then
             echo "No successful workflow run found on branch $MANAGER_BRANCH. Skipping download."
@@ -2226,12 +2268,18 @@ jobs:
           artifact_url=$(gh api "repos/SukiSU-Ultra/SukiSU-Ultra/actions/runs/$run_id/artifacts" | jq -r ".artifacts[] | select(.name == \"$MANAGER_ARTIFACT\") | .archive_download_url" | head -n1)
 
           if [[ -z "$artifact_url" ]]; then
-            echo "No artifact '$MANAGER_ARTIFACT' found in run $run_id. Skipping download."
+            echo "No artifact '$MANAGER_ARTIFACT' found in run $run_id."
+            [[ "$VM_BRIDGE_BUILD" != "true" ]] || exit 1
             exit 0
           fi
           echo "Downloading from: $artifact_url"
           curl -fL -H "Authorization: token $GITHUB_TOKEN" -o "${MANAGER_ARTIFACT}.zip" "$artifact_url"
           unzip -j "${MANAGER_ARTIFACT}.zip" "*.apk" -d ./AnyKernel3/
+          if [[ "$VM_BRIDGE_BUILD" == "true" ]]; then
+            printf 'builtin=%s\nuserspace=%s\nmanager_run=%s\n' \
+              "$KSU_BUILTIN_REV" "$KSU_USERSPACE_REV" "$run_id" > ./AnyKernel3/ksu-uapi6-source.txt
+            sha256sum ./AnyKernel3/*.apk >> ./AnyKernel3/ksu-uapi6-source.txt
+          fi
 
       - name: Set zip Suffix
         id: suffix

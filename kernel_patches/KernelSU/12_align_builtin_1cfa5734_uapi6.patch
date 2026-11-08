@@ -1,0 +1,165 @@
+Subject: Connect builtin UAPI6 to the existing GKI SUSFS contracts
+
+Target: SukiSU builtin 1cfa57340590971cba7521ed536da8ebbedc5f0a.
+The paired SELinux parser is upstream already. Keep it and the sehide1 GKI
+callers; restore global linkage and the existing GKI AV helper wrappers.
+Match sucompat's static-key ABI and expose the PID1 preinit entry point.
+Apply with 51_fix_selinux_timing_gki_android15_6.6.patch and 52 below.
+
+diff --git a/kernel/feature/selinux_hide.c b/kernel/feature/selinux_hide.c
+index 76838d40..bfab10e5 100644
+--- a/kernel/feature/selinux_hide.c
++++ b/kernel/feature/selinux_hide.c
+@@ -52,17 +52,17 @@ enum sel_inos {
+     SEL_INO_NEXT, /* The next inode number to use */
+ };
+ 
+-static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
++int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
+                                                u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p);
+-static int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext,
++int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext,
+                                                u32 *scontext_len);
+-static void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
++void security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
+                                                  struct av_decision *avd);
+-static void (*security_dump_masked_av_fn)(struct policydb *policydb, struct context *scontext, struct context *tcontext,
+-                                          u16 tclass, u32 permissions, const char *reason) = NULL;
+-static void (*context_struct_compute_av_fn)(struct policydb *policydb, struct context *scontext,
++extern void security_dump_masked_av_fn(struct policydb *policydb, struct context *scontext, struct context *tcontext,
++                                          u16 tclass, u32 permissions, const char *reason);
++extern void context_struct_compute_av_fn(struct policydb *policydb, struct context *scontext,
+                                             struct context *tcontext, u16 tclass, struct av_decision *avd,
+-                                            struct extended_perms *xperms) = NULL;
++                                            struct extended_perms *xperms);
+ 
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+ #define ksu_avc_has_perm_compat(...) avc_has_perm(__VA_ARGS__)
+@@ -531,7 +531,7 @@ out:
+     return rc;
+ }
+ 
+-static int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
++int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
+                                                u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p)
+ {
+     struct selinux_policy *orig_policy;
+@@ -674,7 +674,7 @@ static int sidtab_entry_to_string(struct policydb *p, struct sidtab *sidtab, str
+     return rc;
+ }
+ 
+-static int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext,
++int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext,
+                                                u32 *scontext_len)
+ {
+     struct policydb *policydb;
+@@ -1047,7 +1047,7 @@ static void context_struct_compute_av(struct policydb *policydb, struct context
+     type_attribute_bounds_av(policydb, scontext, tcontext, tclass, avd);
+ }
+ 
+-static void __nocfi security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
++void __nocfi security_compute_av_user_with_policy(struct selinux_policy *policy, u32 ssid, u32 tsid, u16 tclass,
+                                                          struct av_decision *avd)
+ {
+     struct policydb *policydb;
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+index f458e563..b14c3609 100644
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -1,7 +1,11 @@
+ #define SU_PATH "/system/bin/su"
+ #define SH_PATH "/system/bin/sh"
+ 
++#ifdef KSU_COMPAT_USE_STATIC_KEY
++DEFINE_STATIC_KEY_TRUE(ksu_su_compat_enabled);
++#else
+ bool ksu_su_compat_enabled __read_mostly = true;
++#endif
+ 
+ static const char su_path[] = SU_PATH;
+ static const char sh_path[] = SH_PATH;
+@@ -9,14 +13,25 @@ static const char ksud_path[] = KSUD_PATH;
+ 
+ static int su_compat_feature_get(u64 *value)
+ {
++#ifdef KSU_COMPAT_USE_STATIC_KEY
++    *value = static_branch_likely(&ksu_su_compat_enabled) ? 1 : 0;
++#else
+     *value = ksu_su_compat_enabled ? 1 : 0;
++#endif
+     return 0;
+ }
+ 
+ static int su_compat_feature_set(u64 value)
+ {
+     bool enable = value != 0;
++#ifdef KSU_COMPAT_USE_STATIC_KEY
++    if (enable)
++        static_branch_enable(&ksu_su_compat_enabled);
++    else
++        static_branch_disable(&ksu_su_compat_enabled);
++#else
+     ksu_su_compat_enabled = enable;
++#endif
+     pr_info("su_compat: set to %d\n", enable);
+     return 0;
+ }
+@@ -40,6 +55,16 @@ static char __user *ksud_user_path(void)
+ 
+ 
+ #ifdef CONFIG_KSU_SUSFS
++/* Called before the normal init/su hook; never redirect a non-init process. */
++int ksu_handle_execveat_preinit(struct filename **filename, void *argv)
++{
++#ifndef KSU_NO_PREINIT
++    if (current->pid == 1)
++        return ksu_setup_preinit_file(filename, (struct user_arg_ptr *)argv);
++#endif
++    return -EINVAL;
++}
++
+ /*
+  * return 0 -> No further checks should be required afterwards
+  * return non-zero -> Further checks should be continued afterwards
+@@ -220,7 +245,11 @@ int ksu_handle_stat(int *dfd, struct filename **filename, int *flags) {
+ #else
+ __attribute__((hot)) static __always_inline bool __is_su_allowed(const void **ptr_to_check)
+ {
++#ifdef KSU_COMPAT_USE_STATIC_KEY
++    if (!static_branch_likely(&ksu_su_compat_enabled))
++#else
+     if (!ksu_su_compat_enabled)
++#endif
+         return false;
+ 
+     if (likely(test_thread_flag(TIF_SECCOMP)))
+diff --git a/kernel/feature/sucompat.h b/kernel/feature/sucompat.h
+index 4bc74371..5b6977b6 100644
+--- a/kernel/feature/sucompat.h
++++ b/kernel/feature/sucompat.h
+@@ -3,7 +3,11 @@
+ #include <asm/ptrace.h>
+ #include <linux/types.h>
+ 
++#ifdef KSU_COMPAT_USE_STATIC_KEY
++extern struct static_key_true ksu_su_compat_enabled;
++#else
+ extern bool ksu_su_compat_enabled;
++#endif
+ 
+ #ifdef CONFIG_KSU_SUSFS
+ int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags);
+diff --git a/kernel/preinit/preinit.h b/kernel/preinit/preinit.h
+index a51d2c98..9b97a488 100644
+--- a/kernel/preinit/preinit.h
++++ b/kernel/preinit/preinit.h
+@@ -7,6 +7,9 @@
+ #ifndef KSU_NO_PREINIT
+ void ksu_preinit_init(void);
+ void ksu_preinit_exit(void);
++struct user_arg_ptr;
++struct filename;
++int ksu_setup_preinit_file(struct filename **filename, struct user_arg_ptr *argv);
+ 
+ // Swap the runner in for PID 1's "/system/bin/init selinux_setup" execve.
+ // Returns true when it issued the syscall itself; the result is in *ret.

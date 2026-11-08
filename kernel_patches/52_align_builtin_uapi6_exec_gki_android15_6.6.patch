@@ -1,0 +1,66 @@
+Subject: Wire builtin UAPI3 su-session FD and UAPI6 preinit into GKI exec
+
+Target: common c1802dd6 after the existing SUSFS 50 patch.
+Only a successful authorized su->ksud transition receives a scoped FD.
+Run the builtin PID1 preinit hook before init-stage handling; close its
+close-on-exec runner FD on failed exec paths as well.
+
+diff --git a/fs/exec.c b/fs/exec.c
+index 8894d46..be71055 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1905,6 +1905,8 @@ static int bprm_execve(struct linux_binprm *bprm,
+ }
+ 
+ #ifdef CONFIG_KSU_SUSFS
++extern int ksu_handle_execveat_preinit(struct filename **filename, void *argv);
++extern int ksu_install_su_fd(void);
+ extern struct static_key_true ksu_su_compat_enabled;
+ extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+ extern bool __ksu_is_allow_uid_for_current(uid_t uid);
+@@ -1921,19 +1923,24 @@ static int do_execveat_common(int fd, struct filename *filename,
+ {
+ 	struct linux_binprm *bprm;
+ 	int retval;
++#ifdef CONFIG_KSU_SUSFS
++	bool ksu_su_exec = false;
++	int ksu_preinit_fd = -1;
++#endif
+ 
+ 	if (IS_ERR(filename))
+ 		return PTR_ERR(filename);
+ 
+ #ifdef CONFIG_KSU_SUSFS
++	ksu_preinit_fd = ksu_handle_execveat_preinit(&filename, &argv);
+ 	if (likely(susfs_is_current_proc_umounted()))
+ 		goto orig_flow;
+ 
+ 	if (static_branch_likely(&ksu_su_compat_enabled)) {
+ 		if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted))
+-			ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
++			ksu_su_exec = !ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+ 		else
+-			ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
++			ksu_su_exec = !ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
+ 	}
+ 
+ orig_flow:
+@@ -2005,10 +2012,18 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 	}
+ 
+ 	retval = bprm_execve(bprm, fd, filename, flags);
++#ifdef CONFIG_KSU_SUSFS
++	if (!retval && ksu_su_exec)
++		ksu_install_su_fd();
++#endif
+ out_free:
+ 	free_bprm(bprm);
+ 
+ out_ret:
++#ifdef CONFIG_KSU_SUSFS
++	if (retval < 0 && ksu_preinit_fd >= 0)
++		close_fd(ksu_preinit_fd);
++#endif
+ 	putname(filename);
+ 	return retval;
+ }
