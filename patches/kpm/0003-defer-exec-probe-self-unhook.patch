@@ -1,0 +1,91 @@
+Subject: Defer exec-probe self-unhook until the active callback returns
+
+Target: loader e565c93 after 0001 unload lifetime and 0002 bridge2.
+The new admission gates pin after_execv while it synchronously calls
+unhook_syscalln on itself. hook_callback_close then waits for the pin
+that can only be dropped after after_execv returns: first userspace
+exec can block PID1 before normal Android startup, even with preinit off.
+Queue one resident callback on current with task_work_add(TWA_RESUME).
+It drains/removes both probes after the syscall trampoline releases
+its gate. Keep normal drain semantics, resident chains, pt_regs probing
+and the bridge unchanged. Do not initialize relocated function pointers
+statically or fall back to synchronous self-drain on queue failure.
+
+diff --git a/kernel/patch/ksyms/execv.c b/kernel/patch/ksyms/execv.c
+--- a/kernel/patch/ksyms/execv.c
++++ b/kernel/patch/ksyms/execv.c
+@@ -7,6 +7,8 @@
+ #include <linux/ptrace.h>
+ #include <log.h>
+ #include <preset.h>
++#include <kallsyms.h>
++#include <uapi/asm-generic/errno.h>
+ 
+ static int first_init_execed = 0;
+ 
+@@ -54,10 +56,39 @@
+     log_boot("    pt_regs offset: %x\n", pt_regs_offset);
+ }
+ 
+-static void after_execv(hook_fargs5_t *args, void *udata)
++static void after_execv(hook_fargs5_t *args, void *udata);
++
++/* Matches enum task_work_notify_mode in the pinned Linux 6.6 kernel. */
++#define EXEC_TWA_RESUME 1
++static int (*exec_task_work_add)(struct task_struct *, struct callback_head *, int);
++static struct callback_head exec_unhook_work;
++static int exec_unhook_queued;
++
++static void deferred_unhook_execv(struct callback_head *work)
+ {
+     unhook_syscalln(__NR_execve, before_execve, after_execv);
+     unhook_syscalln(__NR_execveat, before_execve, after_execv);
++    log_boot("exec probe hooks removed after callback return\n");
++}
++
++static void after_execv(hook_fargs5_t *args, void *udata)
++{
++    int expected = 0;
++    int rc;
++
++    /* The transit still pins this callback. Synchronous unhook would wait
++     * for our own gate count, whose decrement is after this function returns.
++     * TWA_RESUME on current runs only after leaving the syscall trampoline. */
++    if (!__atomic_compare_exchange_n(&exec_unhook_queued, &expected, 1, 0,
++                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
++        return;
++    rc = exec_task_work_add(current, &exec_unhook_work, EXEC_TWA_RESUME);
++    if (rc) {
++        /* Leave the resident probe attached; a later exec can retry cleanup.
++         * Never fall back to draining ourselves from inside the callback. */
++        __atomic_store_n(&exec_unhook_queued, 0, __ATOMIC_RELEASE);
++        log_boot("defer exec probe cleanup failed: %d\n", rc);
++    }
+ }
+ #define _UNUSED(x) (void)(x)
+ int resolve_pt_regs()
+@@ -65,6 +96,15 @@
+     hook_err_t ret = 0;
+     _UNUSED(ret);
+     hook_err_t rc = HOOK_NO_ERR;
++
++    exec_task_work_add = (void *)kallsyms_lookup_name("task_work_add");
++    if (!exec_task_work_add) {
++        log_boot("exec probe: task_work_add unavailable\n");
++        return -EOPNOTSUPP;
++    }
++    /* Assign at runtime: the loader is relocated, so a static function
++     * pointer initializer would retain its link-time address. */
++    exec_unhook_work.func = deferred_unhook_execv;
+ 
+     rc = hook_syscalln(__NR_execve, 3, before_execve, after_execv, (void *)__NR_execve);
+     log_boot("hook __NR_execve rc: %d\n", rc);
+@@ -74,5 +114,5 @@
+     log_boot("hook __NR_execveat rc: %d\n", rc);
+     ret |= rc;
+ 
+-    return rc;
+-}
+\ No newline at end of file
++    return ret;
++}

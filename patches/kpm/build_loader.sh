@@ -16,6 +16,7 @@ test "$(git -C "$WORK" rev-parse HEAD)" = "$SOURCE_REV"
 PATCHES=(
   "$PATCH_DIR/0001-fix-unload-lifetime.patch"
   "$PATCH_DIR/0002-align-sukisu-bridge-v2.patch"
+  "$PATCH_DIR/0003-defer-exec-probe-self-unhook.patch"
 )
 for patch in "${PATCHES[@]}"; do
   git -C "$WORK" apply --check "$patch"
