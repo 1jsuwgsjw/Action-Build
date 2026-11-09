@@ -2039,6 +2039,15 @@ jobs:
             cp "$image_path" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
           fi
           
+      - name: Upload pre-KPX Image for boot diagnosis
+        if: ${{ env.VM_BRIDGE_BUILD == 'true' && github.event.inputs.KPM == 'KPM' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: uapi6-pre-kpx-image
+          path: ./AnyKernel3/Image
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Setup Android NDK for KPM and local SUSFS module
         if: ${{ github.event.inputs.KPM == 'KPM' || github.event.inputs.SUSFS_META != '-1' }}
         run: |
