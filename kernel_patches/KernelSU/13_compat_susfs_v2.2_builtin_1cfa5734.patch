@@ -10,6 +10,7 @@ Do not invent empty NO_SU/zygote_next helpers or advertise a priority command
 that v2.2 does not implement. Priority calls exist only when its command does.
 The UAPI6 dispatch, scoped su FD, preinit and paired SELinux parser stay intact.
 Call the real GKI AV helper functions directly (no optional-pointer warnings).
+Apply after the workflow's FILE_SPOOF/SUS_MAP_UID source preparation.
 
 diff --git a/kernel/feature/selinux_hide.c b/kernel/feature/selinux_hide.c
 index bfab10e5..5065697a 100644
@@ -226,11 +227,11 @@ index 9082a6de..0b73b021 100644
      if (!(current->flags & PF_KTHREAD)) {
          cb = kzalloc(sizeof(*cb), GFP_KERNEL);
 diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
-index 9a94512b..9b963b1f 100644
+index 1d643847..baf310f1 100644
 --- a/kernel/supercall/dispatch.c
 +++ b/kernel/supercall/dispatch.c
-@@ -474,9 +474,11 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
-             susfs_add_sus_map(arg);
+@@ -482,9 +482,11 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
+             susfs_add_sus_map_uid(arg);
              return 0;
  #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 +#ifdef CMD_SUSFS_SET_PRIORITY_UID_FILTER
