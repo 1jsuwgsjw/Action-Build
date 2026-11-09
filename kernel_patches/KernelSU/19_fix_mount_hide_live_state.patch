@@ -1,0 +1,72 @@
+Subject: Honor live mount-view state on already-open files
+
+Target: builtin 1cfa5734 after patches 12-18. Retain the resident wrapper
+but re-evaluate state and reader for newly generated seq records. Publish
+enabled only after symbol resolution succeeds. Already-buffered seq data
+is not retroactively regenerated; no mount rules or markers are changed.
+
+diff --git a/kernel/feature/mount_hide.c b/kernel/feature/mount_hide.c
+--- a/kernel/feature/mount_hide.c
++++ b/kernel/feature/mount_hide.c
+@@ -233,7 +233,7 @@
+     uid_t uid;
+     bool isolated;
+ 
+-    if (!ksu_mount_hide_enabled)
++    if (!smp_load_acquire(&ksu_mount_hide_enabled))
+         return false;
+ 
+     uid = current_uid().val;
+@@ -251,7 +251,9 @@
+     size_t start;
+     int ret;
+ 
+-    if (!m)
++    /* Existing files retain this wrapper, but each newly generated record
++     * follows the current switch and reader, including after disable/rewind. */
++    if (!m || !ksu_should_hide_mount_for_current())
+         return orig(m, mnt);
+ 
+     start = m->count;
+@@ -321,7 +323,7 @@
+ 
+     if (!(mask & MAY_READ))
+         return 0;
+-    if (unlikely(!ksu_mount_hide_running || !ksu_mount_hide_enabled))
++    if (unlikely(!smp_load_acquire(&ksu_mount_hide_enabled)))
+         return 0;
+ 
+     switch (ksu_mount_file_type(file)) {
+@@ -387,7 +389,7 @@
+ 
+ static int mount_hide_feature_get(u64 *value)
+ {
+-    *value = ksu_mount_hide_enabled ? 1 : 0;
++    *value = READ_ONCE(ksu_mount_hide_enabled) ? 1 : 0;
+     return 0;
+ }
+ 
+@@ -398,12 +400,14 @@
+ 
+     pr_info("mount_hide: set to %d\n", enable);
+     mutex_lock(&ksu_mount_hide_mutex);
+-    ksu_mount_hide_enabled = enable;
+     if (enable && !ksu_mount_hide_running) {
+         ret = ksu_mount_hide_resolve();
+         if (!ret)
+             ksu_mount_hide_running = true;
+     }
++    /* Publish only after the original callbacks are resolved successfully. */
++    if (!ret)
++        smp_store_release(&ksu_mount_hide_enabled, enable);
+     mutex_unlock(&ksu_mount_hide_mutex);
+     return ret;
+ }
+@@ -431,6 +435,7 @@
+ void __exit ksu_mount_hide_exit(void)
+ {
+     mutex_lock(&ksu_mount_hide_mutex);
++    smp_store_release(&ksu_mount_hide_enabled, false);
+     ksu_mount_hide_running = false;
+     mutex_unlock(&ksu_mount_hide_mutex);
+     ksu_unregister_feature_handler(KSU_FEATURE_MOUNT_HIDE);

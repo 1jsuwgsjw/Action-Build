@@ -1,0 +1,299 @@
+Subject: Verify dynamic managers against installed packages and retain forced state
+
+Target: builtin 1cfa5734 after patches 12-17. Reuse the existing package
+scanner, opening APKs after iterate_dir. Refresh verification on package
+updates and after data is available, and rebind UIDs only after the stored
+certificate matches. Serialize scans so an old scan cannot republish revoked
+state. Reuse immutable forced values during reload rather than consuming
+pending twice; the public IO toggle obeys the same force lock as SET.
+No change to certificate lists, payload layouts or canonical manager rules.
+
+diff --git a/kernel/extension/extension.c b/kernel/extension/extension.c
+--- a/kernel/extension/extension.c
++++ b/kernel/extension/extension.c
+@@ -359,6 +359,16 @@
+ {
+     return extension_id < KSU_EXTENSION_MAX &&
+            test_bit(extension_id, extension_forced_mask);
++}
++
++/* Boot parameters are immutable after parsing; configuration reloads use
++ * this value without recursively entering the extension dispatcher. */
++bool ksu_extension_forced_value(u32 extension_id, u64 *value)
++{
++    if (!ksu_extension_is_forced(extension_id))
++        return false;
++    *value = extension_forced_values[extension_id];
++    return true;
+ }
+ 
+ int ksu_extension_ioctl(u32 extension_id, u32 caller_api_version, void __user *raw)
+diff --git a/kernel/extension/extension.h b/kernel/extension/extension.h
+--- a/kernel/extension/extension.h
++++ b/kernel/extension/extension.h
+@@ -158,6 +158,7 @@
+ 
+ /* Force an extension to be present. Used by force_feature= extension:<id>. */
+ bool ksu_extension_is_forced(u32 extension_id);
++bool ksu_extension_forced_value(u32 extension_id, u64 *value);
+ 
+ /* Lifecycle: called from ksu_feature_apply_forced. */
+ void ksu_extension_apply_forced(void);
+diff --git a/kernel/extension/dynamic_manager.c b/kernel/extension/dynamic_manager.c
+--- a/kernel/extension/dynamic_manager.c
++++ b/kernel/extension/dynamic_manager.c
+@@ -115,7 +115,7 @@
+ 
+     read_lock(&dynamic_manager_lock);
+     for (i = 0; i < dynamic_manager_count; ++i) {
+-        if (dynamic_managers[i].uid == appid) {
++        if (dynamic_manager_verified[i] && dynamic_managers[i].uid == appid) {
+             found = true;
+             break;
+         }
+@@ -135,6 +135,9 @@
+ 
+ void ksu_dynamic_manager_load(void)
+ {
++    u64 forced_value = 0;
++    bool forced = ksu_extension_forced_value(KSU_EXTENSION_DYNAMIC_MANAGER,
++                                             &forced_value);
+     struct dynamic_manager_state *state;
+     struct file *fp;
+     loff_t pos = 0;
+@@ -163,7 +166,7 @@
+             goto out;
+     }
+     write_lock(&dynamic_manager_lock);
+-    WRITE_ONCE(dynamic_manager_enabled, !!state->enabled);
++    WRITE_ONCE(dynamic_manager_enabled, forced ? !!forced_value : !!state->enabled);
+     dynamic_manager_count = state->count;
+     memcpy(dynamic_managers, state->entries, sizeof(dynamic_managers));
+     memset(dynamic_manager_verified, 0, sizeof(dynamic_manager_verified));
+@@ -171,7 +174,7 @@
+     goto free_state;
+ out:
+     write_lock(&dynamic_manager_lock);
+-    WRITE_ONCE(dynamic_manager_enabled, false);
++    WRITE_ONCE(dynamic_manager_enabled, forced && forced_value);
+     dynamic_manager_count = 0;
+     clear_managers_locked();
+     write_unlock(&dynamic_manager_lock);
+@@ -335,32 +338,42 @@
+ bool ksu_dynamic_manager_verify_apk(char *path, const char *package, uid_t uid)
+ {
+     struct ksu_manager_entry entry = {};
++    char hash[KSU_MANAGER_HASH_LENGTH + 1];
+     unsigned int i;
+     bool found = false;
+ 
++    /* The installed package supplies the UID; a persisted UID may have been
++     * recycled or changed on reinstall. Bind it only after certificate match. */
+     read_lock(&dynamic_manager_lock);
+     for (i = 0; i < dynamic_manager_count; ++i) {
+-        if (!strcmp(dynamic_managers[i].package, package) &&
+-            dynamic_managers[i].uid == uid % KSU_PER_USER_RANGE) {
++        if (!strcmp(dynamic_managers[i].package, package)) {
+             entry = dynamic_managers[i];
+             found = true;
+             break;
+         }
+     }
+     read_unlock(&dynamic_manager_lock);
+-    if (!found ||
+-        !ksu_check_apk_signature(path, entry.cert_size, entry.hash))
+-        return false;
+-
++    if (!found)
++        return false;
++    for (i = 0; i < KSU_MANAGER_HASH_LENGTH; ++i)
++        hash[i] = tolower(entry.hash[i]);
++    hash[KSU_MANAGER_HASH_LENGTH] = '\0';
++    if (!ksu_check_apk_signature(path, entry.cert_size, hash))
++        return false;
++
++    found = false;
+     write_lock(&dynamic_manager_lock);
+     for (i = 0; i < dynamic_manager_count; ++i) {
++        /* Do not publish a result for an entry changed during file I/O. */
+         if (!memcmp(&dynamic_managers[i], &entry, sizeof(entry))) {
++            dynamic_managers[i].uid = uid % KSU_PER_USER_RANGE;
+             dynamic_manager_verified[i] = true;
++            found = true;
+             break;
+         }
+     }
+     write_unlock(&dynamic_manager_lock);
+-    return true;
++    return found;
+ }
+ 
+ int ksu_extension_dynamic_manager_get(u32 id, u64 *value)
+@@ -419,6 +432,11 @@
+             ret = -EFAULT;
+         goto out;
+     }
++    if (cmd->operation == KSU_MANAGER_SET_ENABLED &&
++        ksu_extension_is_forced(KSU_EXTENSION_DYNAMIC_MANAGER)) {
++        ret = -EPERM;
++        goto out;
++    }
+     ret = ksu_dynamic_manager_set(cmd);
+ 
+ out:
+diff --git a/kernel/manager/throne_tracker.c b/kernel/manager/throne_tracker.c
+--- a/kernel/manager/throne_tracker.c
++++ b/kernel/manager/throne_tracker.c
+@@ -3,6 +3,7 @@
+ #define DATA_PATH_LEN 384 // 384 is enough for /data/app/<package>/base.apk
+ 
+ static char cached_manager_apk_path[DATA_PATH_LEN];
++static DEFINE_MUTEX(throne_tracker_mutex);
+ 
+ #define SYSTEM_PACKAGES_LIST_PATH "/data/system/packages.list"
+ 
+@@ -39,6 +40,7 @@
+     void *private_data;
+     int depth;
+     int *stop;
++    bool dynamic;
+ };
+ 
+ // https://docs.kernel.org/filesystems/porting.html
+@@ -53,7 +55,7 @@
+ #define FILLDIR_ACTOR_STOP -EINVAL
+ #endif
+ 
+-static bool maybe_manager_apk_dir(const char *path)
++static bool maybe_manager_apk_dir(const char *path, bool dynamic)
+ {
+     _Static_assert(sizeof(KSU_PACKAGE_NAME) < KSU_MAX_PACKAGE_NAME, "KSU_PACKAGE_NAME too long!");
+     char pkg[KSU_MAX_PACKAGE_NAME];
+@@ -62,6 +64,8 @@
+         return false;
+     }
+ 
++    if (dynamic)
++        return ksu_dynamic_manager_package_registered(pkg);
+     // pkg is `<real package>`
+     return strncmp(pkg, KSU_PACKAGE_NAME, sizeof(KSU_PACKAGE_NAME)) == 0;
+ }
+@@ -103,9 +107,10 @@
+ 
+     // now put this on candidate_path
+     if (d_type == DT_REG && !strncmp(name, "base.apk", 8)) {
+-        if (maybe_manager_apk_dir(my_ctx->parent_dir)) {
++        if (maybe_manager_apk_dir(my_ctx->parent_dir, my_ctx->dynamic)) {
+             snprintf(candidate_path, DATA_PATH_LEN, "%s/%.*s", my_ctx->parent_dir, namelen, name);
+-            strcpy(cached_manager_apk_path, candidate_path);
++            if (!my_ctx->dynamic)
++                strcpy(cached_manager_apk_path, candidate_path);
+         }
+         // As soon as we met the base.apk, we can stop
+         return FILLDIR_ACTOR_STOP;
+@@ -114,7 +119,7 @@
+     return FILLDIR_ACTOR_CONTINUE;
+ }
+ 
+-static void search_manager(const char *path, int depth, struct list_head *uid_data)
++static void search_manager(const char *path, int depth, struct list_head *uid_data, bool dynamic)
+ {
+     int i, stop = 0;
+     struct list_head data_path_list;
+@@ -144,7 +149,9 @@
+                                           .data_path_list = &data_path_list,
+                                           .parent_dir = pos->dirpath,
+                                           .private_data = candidate_path,
+-                                          .depth = pos->depth };
++                                          .depth = pos->depth,
++                                          .dynamic = dynamic };
++            candidate_path[0] = 0;
+ 
+             struct file *file = ksu_filp_open_nonotify(pos->dirpath, O_RDONLY | O_NOFOLLOW);
+             if (IS_ERR(file)) {
+@@ -176,6 +183,23 @@
+             if (!strstarts(candidate_path, "/data/ap"))
+                 goto skip_iterate;
+ 
++            if (dynamic) {
++                char pkg[KSU_MAX_PACKAGE_NAME];
++                struct uid_data *installed;
++
++                if (get_pkg_from_apk_dir_path(pkg, pos->dirpath) < 0)
++                    goto skip_iterate;
++                /* APK I/O runs after iterate_dir released the directory lock. */
++                list_for_each_entry (installed, uid_data, list) {
++                    if (!strcmp(installed->package, pkg)) {
++                        ksu_dynamic_manager_verify_apk(candidate_path, pkg,
++                                                       installed->uid);
++                        break;
++                    }
++                }
++                goto skip_iterate;
++            }
++
+ 			// As soon as we get the manager apk path, we can stop
+             stop = 1;
+ 
+@@ -190,8 +214,7 @@
+ 
+         skip_iterate:
+             list_del(&pos->list);
+-            if (pos != data)
+-                kfree(pos);
++            kfree(pos);
+         }
+     }
+ }
+@@ -213,8 +236,14 @@
+ 
+ void track_throne(bool prune_only)
+ {
+-    const struct cred *old_cred = override_creds(ksu_cred);
+-    struct file *fp = filp_open(SYSTEM_PACKAGES_LIST_PATH, O_RDONLY, 0);
++    const struct cred *old_cred;
++    struct file *fp;
++
++    mutex_lock(&throne_tracker_mutex);
++    if (!prune_only)
++        ksu_dynamic_manager_reset_verification();
++    old_cred = override_creds(ksu_cred);
++    fp = filp_open(SYSTEM_PACKAGES_LIST_PATH, O_RDONLY, 0);
+     if (IS_ERR(fp)) {
+         pr_err("%s: open " SYSTEM_PACKAGES_LIST_PATH " failed: %ld\n", __func__, PTR_ERR(fp));
+         goto out_revert_cred;
+@@ -343,11 +372,14 @@
+             }
+         }
+         pr_info("Searching manager " KSU_PACKAGE_NAME "...\n");
+-        search_manager("/data/app", 2, &uid_list);
++        search_manager("/data/app", 2, &uid_list, false);
+         pr_info("Search manager finished\n");
+     }
+ 
+ prune:
++    /* Also run when the canonical manager was cached or a fallback won. */
++    if (!prune_only && ksu_manager_enabled())
++        search_manager("/data/app", 2, &uid_list, true);
+     // then prune the allowlist
+     ksu_prune_allowlist(is_uid_exist, &uid_list);
+ out:
+@@ -358,6 +390,7 @@
+     }
+ out_revert_cred:
+     revert_creds(old_cred);
++    mutex_unlock(&throne_tracker_mutex);
+ }
+ 
+ void __init ksu_throne_tracker_init(void)
+diff --git a/kernel/runtime/ksud.c b/kernel/runtime/ksud.c
+--- a/kernel/runtime/ksud.c
++++ b/kernel/runtime/ksud.c
+@@ -53,6 +53,7 @@
+     ksu_load_allow_list();
+     ksu_dynamic_manager_load();
+     ksu_observer_init();
++    track_throne(false);
+     // sanity check, this may influence the performance
+     stop_input_hook();
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)

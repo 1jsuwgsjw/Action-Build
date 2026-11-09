@@ -1310,26 +1310,33 @@ jobs:
             TIMING_PATCH_DIR="$GITHUB_WORKSPACE/kernel_workspace/susfs4ksu/kernel_patches"
             KSU_TIMING_PATCH="$TIMING_PATCH_DIR/KernelSU/12_align_builtin_1cfa5734_uapi6.patch"
             GKI_EXEC_PATCH="$TIMING_PATCH_DIR/52_align_builtin_uapi6_exec_gki_android15_6.6.patch"
+            GKI_INTERFACE_PATCH="$TIMING_PATCH_DIR/53_expose_susfs_kernel_setters_android15_6.6.patch"
             GKI_TIMING_PATCH="$TIMING_PATCH_DIR/51_fix_selinux_timing_gki_android15_6.6.patch"
             KSU_V22_PATCHES=(
               "$TIMING_PATCH_DIR/KernelSU/13_compat_susfs_v2.2_builtin_1cfa5734.patch"
               "$TIMING_PATCH_DIR/KernelSU/14_compat_susfs_v2.2_sepolicy_tracking.patch"
               "$TIMING_PATCH_DIR/KernelSU/15_fix_faccessat_user_pointer_abi.patch"
               "$TIMING_PATCH_DIR/KernelSU/16_fix_unity_forced_bitmap_alias.patch"
+              "$TIMING_PATCH_DIR/KernelSU/17_fix_preinit_path_termination.patch"
+              "$TIMING_PATCH_DIR/KernelSU/18_fix_dynamic_manager_identity_and_forcing.patch"
+              "$TIMING_PATCH_DIR/KernelSU/19_fix_mount_hide_live_state.patch"
+              "$TIMING_PATCH_DIR/KernelSU/20_wire_manager_susfs_feature_and_uname.patch"
             )
             test "$(git -C ../KernelSU rev-parse HEAD)" = "$KSU_BUILTIN_REV"
             git -C ../KernelSU apply --check "$KSU_TIMING_PATCH"
             git apply --check "$GKI_TIMING_PATCH"
             git apply --check "$GKI_EXEC_PATCH"
+            git apply --check "$GKI_INTERFACE_PATCH"
             git -C ../KernelSU apply "$KSU_TIMING_PATCH"
             grep -q '^#define SUSFS_VERSION "v2.2.0"' include/linux/susfs.h
             for ksu_patch in "${KSU_V22_PATCHES[@]}"; do
               git -C ../KernelSU apply --check "$ksu_patch"
               git -C ../KernelSU apply "$ksu_patch"
             done
-            echo "Applied pinned SUSFS v2.2.0 caller compatibility (13 + 14 + 15 + 16)"
+            echo "Applied pinned SUSFS v2.2.0 compatibility and source fixes (13-20)"
             git apply "$GKI_TIMING_PATCH"
             git apply "$GKI_EXEC_PATCH"
+            git apply "$GKI_INTERFACE_PATCH"
             echo "Applied builtin UAPI6 adapters: upstream paired SELinux parser + sehide1 GKI callers, static-key sucompat, scoped su FD and preinit"
           fi
 
@@ -1983,7 +1990,11 @@ jobs:
             bash "$GITHUB_WORKSPACE/vm_bridge_source/scripts/build_against_existing_output.sh"
 
           test -s "$OUT/drivers/kernelsu/preinit/runner.elf"
-          cp "$OUT/drivers/kernelsu/ksu_main.o" "$EVIDENCE/ksu_main.o"
+          for source in "$OUT/drivers/kernelsu/ksu_main.o" \
+            "$OUT/drivers/kernelsu/preinit/preinit.o" "$OUT/fs/susfs.o" \
+            "$COMMON/fs/susfs.c" "$COMMON/include/linux/susfs.h"; do
+            cp "$source" "$EVIDENCE/$(basename "$source")"
+          done
           test "$(git -C "$PLATFORM/KernelSU" rev-parse HEAD)" = "$KSU_BUILTIN_REV"
           git -C "$PLATFORM/KernelSU" diff --binary > "$EVIDENCE/kernelsu-applied.patch"
           {

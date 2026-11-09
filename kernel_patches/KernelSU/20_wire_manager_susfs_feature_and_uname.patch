@@ -1,0 +1,128 @@
+Subject: Wire manager AVC feature and UTS ioctl into real SUSFS setters
+
+Target: builtin 1cfa5734 after patches 12-19, paired with common patch 53.
+Match userspace d7d04281 feature ID 10003 and write-direction K/102 payload.
+Use the existing feature registration/force machinery and manager-or-root
+permission checks. No UAPI version bump and no separate fake feature state.
+Without the relevant SUSFS configuration, report unsupported.
+
+diff --git a/kernel/include/uapi/feature.h b/kernel/include/uapi/feature.h
+--- a/kernel/include/uapi/feature.h
++++ b/kernel/include/uapi/feature.h
+@@ -16,6 +16,8 @@
+      */
+     KSU_FEATURE_MOUNT_HIDE = 16,
+ 
++    KSU_FEATURE_AVC_SPOOF = 10003,
++
+     KSU_FEATURE_MAX
+ };
+ 
+diff --git a/kernel/include/uapi/supercall.h b/kernel/include/uapi/supercall.h
+--- a/kernel/include/uapi/supercall.h
++++ b/kernel/include/uapi/supercall.h
+@@ -191,6 +191,11 @@
+ 
+ struct ksu_hook_type_cmd {
+     char hook_type[32]; // Output: hook type string
++};
++
++struct ksu_set_spoof_version_cmd {
++    __u8 release[65];
++    __u8 version[65];
+ };
+ 
+ /* IOCTL command definitions */
+@@ -225,5 +230,6 @@
+ // Other IOCTL command definitions
+ DECLARE(__u32, KSU_IOCTL_GET_FULL_VERSION, _IOC(_IOC_READ, 'K', 100, 0));
+ DECLARE(__u32, KSU_IOCTL_HOOK_TYPE, _IOC(_IOC_READ, 'K', 101, 0));
++DECLARE(__u32, KSU_IOCTL_SET_SPOOF_VERSION, _IOC(_IOC_WRITE, 'K', 102, 0));
+ 
+ #endif
+diff --git a/kernel/policy/feature.c b/kernel/policy/feature.c
+--- a/kernel/policy/feature.c
++++ b/kernel/policy/feature.c
+@@ -10,6 +10,7 @@
+     [KSU_FEATURE_SELINUX_HIDE] = "selinux_hide",
+     [KSU_FEATURE_SHELL_SU_ADB_ONLY] = "shell_su_adb_only",
+     [KSU_FEATURE_MOUNT_HIDE] = "mount_hide",
++    [KSU_FEATURE_AVC_SPOOF] = "avc_spoof",
+ };
+ 
+ // Features forced by boot config. Written only while parsing module params
+@@ -268,6 +269,27 @@
+     mutex_unlock(&feature_mutex);
+ }
+ 
++#ifdef CONFIG_KSU_SUSFS
++static int avc_spoof_feature_get(u64 *value)
++{
++    *value = susfs_get_avc_log_spoofing_enabled();
++    return 0;
++}
++
++static int avc_spoof_feature_set(u64 value)
++{
++    susfs_set_avc_log_spoofing_enabled(value != 0);
++    return 0;
++}
++
++static const struct ksu_feature_handler avc_spoof_handler = {
++    .feature_id = KSU_FEATURE_AVC_SPOOF,
++    .name = "avc_spoof",
++    .get_handler = avc_spoof_feature_get,
++    .set_handler = avc_spoof_feature_set,
++};
++#endif
++
+ void __init ksu_feature_init(void)
+ {
+     int i;
+@@ -276,6 +298,9 @@
+         feature_handlers[i] = NULL;
+     }
+ 
++#ifdef CONFIG_KSU_SUSFS
++    ksu_register_feature_handler(&avc_spoof_handler);
++#endif
+     pr_info("feature: feature management initialized\n");
+ }
+ 
+diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -716,6 +716,20 @@
+     }
+ 
+     return 0;
++}
++
++static int do_set_spoof_version(void __user *arg)
++{
++#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
++    struct ksu_set_spoof_version_cmd cmd;
++
++    if (copy_from_user(&cmd, arg, sizeof(cmd)))
++        return -EFAULT;
++    return susfs_set_uname_kernel((const char *)cmd.release,
++                                  (const char *)cmd.version);
++#else
++    return -EOPNOTSUPP;
++#endif
+ }
+ 
+ /* Capability bits for a reply: handler caps plus the bits the dispatcher
+@@ -1029,6 +1043,12 @@
+         .handler = do_get_hook_type,
+         .perm_check = manager_or_root
+     },
++    {
++        .cmd = KSU_IOCTL_SET_SPOOF_VERSION,
++        .name = "SET_SPOOF_VERSION",
++        .handler = do_set_spoof_version,
++        .perm_check = manager_or_root
++    },
+     {   .cmd = KSU_IOCTL_EXTENSION,
+         .name = "EXTENSION",
+         .handler = do_extension,

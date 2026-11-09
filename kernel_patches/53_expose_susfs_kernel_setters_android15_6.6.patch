@@ -1,0 +1,151 @@
+Subject: Share SUSFS state between legacy and manager kernel callers
+
+Target: the pinned SUSFS v2.2.0 fs/susfs.c and susfs.h copied into common.
+Extract typed, kernel-pointer helpers; legacy reboot wrappers retain their
+user payloads and error copyout. Preserve the same static key, uname buffer,
+seqlock and per-process hook scope. Honor all 64 UTS characters plus NUL.
+No fabricated userspace pointers or new state copies.
+
+diff --git a/fs/susfs.c b/fs/susfs.c
+--- a/fs/susfs.c
++++ b/fs/susfs.c
+@@ -614,6 +614,35 @@
+ DEFINE_STATIC_KEY_FALSE(susfs_is_uname_spoof_buffer_set);
+ static DEFINE_SEQLOCK(susfs_uname_seqlock);
+ 
++int susfs_set_uname_kernel(const char *release, const char *version) {
++	if (!*release || !*version)
++		return -EFAULT;
++	if (strnlen(release, sizeof(my_uname.release)) == sizeof(my_uname.release) ||
++		strnlen(version, sizeof(my_uname.version)) == sizeof(my_uname.version))
++		return -ENAMETOOLONG;
++
++	write_seqlock(&susfs_uname_seqlock);
++	if (!strcmp(release, "default")) {
++		strscpy(my_uname.release, utsname()->release, sizeof(my_uname.release));
++	} else {
++		strscpy(my_uname.release, release, sizeof(my_uname.release));
++	}
++	if (!strcmp(version, "default")) {
++		strscpy(my_uname.version, utsname()->version, sizeof(my_uname.version));
++	} else {
++		strscpy(my_uname.version, version, sizeof(my_uname.version));
++	}
++	write_sequnlock(&susfs_uname_seqlock);
++
++	if (!static_key_enabled(&susfs_is_uname_spoof_buffer_set))
++		static_branch_enable(&susfs_is_uname_spoof_buffer_set);
++
++	SUSFS_LOGI("set spoofed release: '%s', version: '%s'\n",
++				my_uname.release, my_uname.version);
++
++	return 0;
++}
++
+ void susfs_set_uname(void __user **user_info) {
+ 	struct st_susfs_uname info = {0};
+ 
+@@ -621,32 +650,7 @@
+ 		info.err = -EFAULT;
+ 		goto out_copy_to_user;
+ 	}
+-
+-	if (*info.release == '\0' || *info.version == '\0') {
+-		info.err = -EFAULT;
+-		goto out_copy_to_user;
+-	}
+-
+-	write_seqlock(&susfs_uname_seqlock);
+-	if (!strcmp(info.release, "default")) {
+-		strscpy(my_uname.release, utsname()->release, __NEW_UTS_LEN);
+-	} else {
+-		strscpy(my_uname.release, info.release, __NEW_UTS_LEN);
+-	}
+-	if (!strcmp(info.version, "default")) {
+-		strscpy(my_uname.version, utsname()->version, __NEW_UTS_LEN);
+-	} else {
+-		strscpy(my_uname.version, info.version, __NEW_UTS_LEN);
+-	}
+-	write_sequnlock(&susfs_uname_seqlock);
+-
+-	if (!static_key_enabled(&susfs_is_uname_spoof_buffer_set))
+-		static_branch_enable(&susfs_is_uname_spoof_buffer_set);
+-
+-	SUSFS_LOGI("set spoofed release: '%s', version: '%s'\n",
+-				my_uname.release, my_uname.version);
+-
+-	info.err = 0;
++	info.err = susfs_set_uname_kernel(info.release, info.version);
+ out_copy_to_user:
+ 	if (copy_to_user(&((struct st_susfs_uname __user*)*user_info)->err, &info.err, sizeof(info.err))) {
+ 		info.err = -EFAULT;
+@@ -659,8 +663,8 @@
+ 
+ 	do {
+ 		seq = read_seqbegin(&susfs_uname_seqlock);
+-		strscpy(tmp->release, my_uname.release, __NEW_UTS_LEN);
+-		strscpy(tmp->version, my_uname.version, __NEW_UTS_LEN);
++		strscpy(tmp->release, my_uname.release, sizeof(tmp->release));
++		strscpy(tmp->version, my_uname.version, sizeof(tmp->version));
+ 	} while (read_seqretry(&susfs_uname_seqlock, seq));
+ }
+ #endif // #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+@@ -1524,21 +1528,29 @@
+ /* susfs avc log spoofing */
+ DEFINE_STATIC_KEY_FALSE(susfs_is_avc_log_spoofing_enabled);
+ 
+-void susfs_set_avc_log_spoofing(void __user **user_info) {
+-	struct st_susfs_avc_log_spoofing info = {0};
+-
+-	if (copy_from_user(&info, (struct st_susfs_avc_log_spoofing __user*)*user_info, sizeof(info))) {
+-		info.err = -EFAULT;
+-		goto out_copy_to_user;
+-	}
+-
+-	if (info.enabled) {
++bool susfs_get_avc_log_spoofing_enabled(void) {
++	return static_key_enabled(&susfs_is_avc_log_spoofing_enabled);
++}
++
++void susfs_set_avc_log_spoofing_enabled(bool enabled) {
++	if (enabled) {
+ 		static_branch_enable(&susfs_is_avc_log_spoofing_enabled);
+ 		SUSFS_LOGI("enabling susfs_avc_log_spoofing\n");
+ 	} else {
+ 		static_branch_disable(&susfs_is_avc_log_spoofing_enabled);
+ 		SUSFS_LOGI("disabling susfs_avc_log_spoofing\n");
+ 	}
++}
++
++void susfs_set_avc_log_spoofing(void __user **user_info) {
++	struct st_susfs_avc_log_spoofing info = {0};
++
++	if (copy_from_user(&info, (struct st_susfs_avc_log_spoofing __user*)*user_info, sizeof(info))) {
++		info.err = -EFAULT;
++		goto out_copy_to_user;
++	}
++
++	susfs_set_avc_log_spoofing_enabled(info.enabled);
+ 
+ 	info.err = 0;
+ out_copy_to_user:
+diff --git a/include/linux/susfs.h b/include/linux/susfs.h
+--- a/include/linux/susfs.h
++++ b/include/linux/susfs.h
+@@ -238,6 +238,7 @@
+ 
+ /* spoof_uname */
+ #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
++int susfs_set_uname_kernel(const char *release, const char *version);
+ void susfs_set_uname(void __user **user_info);
+ void susfs_spoof_uname(struct new_utsname* tmp);
+ #endif
+@@ -270,6 +271,8 @@
+ void susfs_add_sus_map_uid(void __user **user_info);
+ #endif
+ 
++bool susfs_get_avc_log_spoofing_enabled(void);
++void susfs_set_avc_log_spoofing_enabled(bool enabled);
+ void susfs_set_avc_log_spoofing(void __user **user_info);
+ 
+ void susfs_get_enabled_features(void __user **user_info);
