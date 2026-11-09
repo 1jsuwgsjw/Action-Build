@@ -1,0 +1,43 @@
+Subject: Keep v2.2 paired-policy hiding without newer SUSFS tracking symbols
+
+CI 42539431924 reached final linking and reported two absent SUSFS symbols.
+The pinned v2.2.0 tree uses backup_sepolicy and the sehide1 paired parser;
+it does not implement the newer per-type/per-AV bookkeeping functions.
+Remove only these new callers/declarations, as in the accepted b88403d2
+integration. Retain the actual rule/type edits, new policy-size/xperm fixes,
+backup-policy implementation and all UAPI6 functionality. No empty stubs.
+
+diff --git a/kernel/selinux/sepolicy.c b/kernel/selinux/sepolicy.c
+index e57da5d5..d8aa28e0 100644
+--- a/kernel/selinux/sepolicy.c
++++ b/kernel/selinux/sepolicy.c
+@@ -1,8 +1,3 @@
+-#ifdef CONFIG_KSU_SUSFS
+-extern int susfs_add_sus_avd_allowed_by_type(u32 s_type, u32 t_type, u16 type, u32 orig_avd_allowed);
+-extern int susfs_add_sus_type(const char *secctx, u32 type_value);
+-#endif // #ifdef CONFIG_KSU_SUSFS
+-
+ #define KSU_SUPPORT_ADD_TYPE
+ 
+ //////////////////////////////////////////////////////
+@@ -326,10 +321,6 @@ static bool add_rule_raw(struct policydb *db, struct type_datum *src, struct typ
+                 return false;
+         }
+ 
+-#ifdef CONFIG_KSU_SUSFS
+-        susfs_add_sus_avd_allowed_by_type(src->value, tgt->value, cls->value, node->datum.u.data);
+-#endif // #ifdef CONFIG_KSU_SUSFS
+-
+         if (invert) {
+             if (perm)
+                 node->datum.u.data &= ~(1U << (perm->value - 1));
+@@ -753,9 +744,6 @@ static bool add_type(struct policydb *db, const char *type_name, bool attr)
+         ebitmap_set_bit(&db->role_val_to_struct[i]->types, value - 1, 1);
+     }
+ 
+-#ifdef CONFIG_KSU_SUSFS
+-    susfs_add_sus_type(type_name, type->value);
+-#endif // #ifdef CONFIG_KSU_SUSFS
+     return true;
+ 
+ #elif defined(KSU_TYPE_VAL_TO_STRUCT_ARRAY)
