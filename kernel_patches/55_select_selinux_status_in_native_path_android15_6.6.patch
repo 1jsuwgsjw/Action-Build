@@ -1,0 +1,110 @@
+Subject: Select the SELinux snapshot in the native status-page path
+
+Target: common android15-6.6 after status active-state patch 54.
+A separate status .open wrapper waits on status_lock and is visible through
+/proc/self/task/<tid>/wchan. Keep the stock .open callback and choose the
+snapshot under the existing selinux_kernel_status_page critical section.
+Keep running (not saved enabled intent) as the gate. Read and mmap still use
+the page chosen at open. Preserve late snapshot initialization after the
+native lock is released, since initialize_fake_status takes that lock too.
+No policy/status contents, UID scope, or snapshot lifetime changes.
+
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -46,11 +46,7 @@
+ 
+ #ifdef CONFIG_KSU_SUSFS
+ extern struct selinux_policy *backup_sepolicy;
+-extern struct page *fake_status;
+-extern struct static_key_false fake_status_initialize_key;
+ extern bool ksu_selinux_hide_running __read_mostly;
+-extern bool ksu_selinux_hide_enabled __read_mostly;
+-extern void initialize_fake_status(void);
+ extern int security_context_to_sid_with_policy(struct selinux_policy *policy, const char *scontext, u32 scontext_len,
+                                                u32 *sid, u32 def_sid, gfp_t gfp_flags, u32 *orig_sid_p, int *orig_rc_p);
+ extern int security_sid_to_context_with_policy(struct selinux_policy *policy, u32 sid, char **scontext,
+@@ -243,30 +239,6 @@
+ 	return 0;
+ }
+ 
+-#ifdef CONFIG_KSU_SUSFS
+-static int my_sel_open_handle_status(struct inode *inode, struct file *filp)
+-{
+-	void *data;
+-	int ret;
+-
+-	/* A saved enable request can still be waiting for a reboot. */
+-	if (likely(current_uid().val >= 10000 && ksu_selinux_hide_running)) {
+-		mutex_lock(&selinux_state.status_lock);
+-		data = fake_status;
+-		mutex_unlock(&selinux_state.status_lock);
+-		if (data) {
+-			filp->private_data = data;
+-			return 0;
+-		}
+-	}
+-
+-	ret = sel_open_handle_status(inode, filp);
+-	if (static_branch_unlikely(&fake_status_initialize_key) && !ret && !fake_status)
+-		initialize_fake_status();
+-	return ret;
+-}
+-#endif // #ifdef CONFIG_KSU_SUSFS
+-
+ static ssize_t sel_read_handle_status(struct file *filp, char __user *buf,
+ 				      size_t count, loff_t *ppos)
+ {
+@@ -302,11 +274,7 @@
+ }
+ 
+ static const struct file_operations sel_handle_status_ops = {
+-#ifdef CONFIG_KSU_SUSFS
+-	.open		= my_sel_open_handle_status,
+-#else
+ 	.open		= sel_open_handle_status,
+-#endif // #ifdef CONFIG_KSU_SUSFS
+ 	.read		= sel_read_handle_status,
+ 	.mmap		= sel_mmap_handle_status,
+ 	.llseek		= generic_file_llseek,
+diff --git a/security/selinux/status.c b/security/selinux/status.c
+--- a/security/selinux/status.c
++++ b/security/selinux/status.c
+@@ -12,6 +12,16 @@
+ #include <linux/mutex.h>
+ #include "avc.h"
+ #include "security.h"
++
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/cred.h>
++#include <linux/jump_label.h>
++
++extern struct page *fake_status;
++extern struct static_key_false fake_status_initialize_key;
++extern bool ksu_selinux_hide_running __read_mostly;
++extern void initialize_fake_status(void);
++#endif
+ 
+ /*
+  * The selinux_status_page shall be exposed to userspace applications
+@@ -66,7 +76,20 @@
+ 		}
+ 	}
+ 	result = selinux_state.status_page;
++#ifdef CONFIG_KSU_SUSFS
++	/* Select the snapshot under the native status-page lock, not in .open. */
++	if (current_uid().val >= 10000 &&
++	    READ_ONCE(ksu_selinux_hide_running) && fake_status)
++		result = fake_status;
++#endif
+ 	mutex_unlock(&selinux_state.status_lock);
++
++#ifdef CONFIG_KSU_SUSFS
++	/* The initializer takes status_lock itself; keep it outside this lock. */
++	if (static_branch_unlikely(&fake_status_initialize_key) && result &&
++	    !READ_ONCE(fake_status))
++		initialize_fake_status();
++#endif
+ 
+ 	return result;
+ }

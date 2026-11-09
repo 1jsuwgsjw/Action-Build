@@ -1,0 +1,23 @@
+Subject: Gate SELinux status on active hiding, not saved intent
+
+Target: common android15-6.6 after the pinned SUSFS and sehide1 patches.
+A late enable may return EAGAIN after the backup policy was dropped.
+KernelSU deliberately retains enabled=1 for the next boot while running=0.
+Context/access queries use running, but status open used enabled and could
+select the snapshot alone. Use the same effective-state gate for status.
+Preserve the existing save-and-reboot contract and status contents.
+This does not address detectors operating with hiding successfully active.
+
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -249,7 +249,8 @@
+ 	void *data;
+ 	int ret;
+ 
+-	if (likely(current_uid().val >= 10000 && ksu_selinux_hide_enabled)) {
++	/* A saved enable request can still be waiting for a reboot. */
++	if (likely(current_uid().val >= 10000 && ksu_selinux_hide_running)) {
+ 		mutex_lock(&selinux_state.status_lock);
+ 		data = fake_status;
+ 		mutex_unlock(&selinux_state.status_lock);
