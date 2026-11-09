@@ -1930,7 +1930,9 @@ jobs:
           if [[ "$VM_BRIDGE_BUILD" == "true" ]]; then
             # The builtin preinit runner needs generated kernel UAPI headers.
             make O=out "${MAKE_ARGS[@]}" headers --no-print-directory
-            # Compile the real changed KSU objects before spending time on the full kernel.
+            # KSU includes SELinux-generated flask.h/av_permissions.h. Build their
+            # owning directory first, then compile KSU before the full kernel.
+            make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" security/selinux/
             make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}" drivers/kernelsu/
           fi
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
