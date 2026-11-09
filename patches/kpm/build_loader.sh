@@ -13,8 +13,14 @@ git -C "$WORK" remote add origin https://github.com/SukiSU-Ultra/SukiSU_KernelPa
 git -C "$WORK" fetch --depth=1 origin "$SOURCE_REV"
 git -C "$WORK" checkout --detach FETCH_HEAD
 test "$(git -C "$WORK" rev-parse HEAD)" = "$SOURCE_REV"
-git -C "$WORK" apply --check "$PATCH_DIR/0001-fix-unload-lifetime.patch"
-git -C "$WORK" apply "$PATCH_DIR/0001-fix-unload-lifetime.patch"
+PATCHES=(
+  "$PATCH_DIR/0001-fix-unload-lifetime.patch"
+  "$PATCH_DIR/0002-align-sukisu-bridge-v2.patch"
+)
+for patch in "${PATCHES[@]}"; do
+  git -C "$WORK" apply --check "$patch"
+  git -C "$WORK" apply "$patch"
+done
 make -C "$WORK/kernel" -j"$(nproc)" TARGET_COMPILE="$TOOLS" \
   CC="$TOOLS/clang --target=aarch64-linux-android35"
 cmake -S "$WORK/tools" -B "$WORK/host-build" -DCMAKE_BUILD_TYPE=Release
@@ -24,6 +30,7 @@ chmod +x "$OUT/kptools"
 {
   printf 'source_revision=%s\n' "$SOURCE_REV"
   "$TOOLS/clang" --version
-  sha256sum "$PATCH_DIR/0001-fix-unload-lifetime.patch"
+  printf 'sukisu_kpm_abi=2\n'
+  sha256sum "${PATCHES[@]}"
 } > "$OUT/build-info.txt"
 (cd "$OUT" && sha256sum kpimg kpimg.elf kptools > SHA256SUMS)

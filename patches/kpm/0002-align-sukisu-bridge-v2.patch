@@ -1,0 +1,285 @@
+Subject: Connect UAPI6 builtin to the matching kernel-only KPM bridge ABI v2
+
+Target: SukiSU_KernelPatch_patch e565c93 after 0001-fix-unload-lifetime.
+SukiSU builtin 1cfa5734 no longer exports the seven legacy KPM stubs.
+Backport the bridge framing/dispatcher from upstream 1c5b608916357ac86a94cc736e235db1fac4a29d,
+retaining the legacy path and our callback/module lifetime implementation.
+Use the existing module-list lock rather than an unmatched RCU reader.
+Honor the new bounded LIST/INFO output contract and event-aware file loads.
+This repairs the confirmed KPM ABI mismatch; it is not proof that the
+separate first-screen boot failure has been resolved.
+
+diff --git a/kernel/patch/include/module.h b/kernel/patch/include/module.h
+index cfe4541..592c3cd 100644
+--- a/kernel/patch/include/module.h
++++ b/kernel/patch/include/module.h
+@@ -57,6 +57,7 @@ struct module
+ 
+ long load_module(const void *data, int len, const char *args, const char *event, void *__user reserved);
+ long load_module_path(const char *path, const char *args, void *__user reserved);
++long load_module_path_event(const char *path, const char *args, const char *event, void *__user reserved);
+ long module_control0(const char *name, const char *ctl_args, char *__user out_msg, int outlen);
+ long module_control1(const char *name, void *a1, void *a2, void *a3);
+ long unload_module(const char *name, void *__user reserved);
+diff --git a/kernel/patch/module/module.c b/kernel/patch/module/module.c
+index 75f2ade..550f722 100644
+--- a/kernel/patch/module/module.c
++++ b/kernel/patch/module/module.c
+@@ -512,7 +512,7 @@ long unload_module(const char *name, void *__user reserved)
+     return 0;
+ }
+ 
+-long load_module_path(const char *path, const char *args, void *__user reserved)
++long load_module_path_event(const char *path, const char *args, const char *event, void *__user reserved)
+ {
+     long rc = 0;
+     logkfd("%s\n", path);
+@@ -545,13 +545,18 @@ long load_module_path(const char *path, const char *args, void *__user reserved)
+         goto free;
+     }
+ 
+-    rc = load_module(data, len, args, "load-file", reserved);
++    rc = load_module(data, len, args, event, reserved);
+ free:
+     kvfree(data);
+ out:
+     return rc;
+ }
+ 
++long load_module_path(const char *path, const char *args, void *__user reserved)
++{
++    return load_module_path_event(path, args, "load-file", reserved);
++}
++
+ long module_control0(const char *name, const char *ctl_args, char *__user out_msg, int outlen)
+ {
+     if (!name || !ctl_args || !*ctl_args) return -EINVAL;
+@@ -616,11 +621,24 @@ int list_modules(char *out_names, int size)
+ 
+     struct module *pos;
+     int off = 0;
++    if (size <= 0) {
++        spin_unlock_irqrestore(&module_lock, flags);
++        return -ENOBUFS;
++    }
++    out_names[0] = '\0';
+     list_for_each_entry(pos, &modules.list, list)
+     {
+-        off += snprintf(out_names + off, size - 1 - off, "%s\n", pos->info.name);
++        int len = strlen(pos->info.name);
++        int separator = off != 0;
++        if (len + separator >= size - off) {
++            spin_unlock_irqrestore(&module_lock, flags);
++            return -ENOBUFS;
++        }
++        if (separator) out_names[off++] = '\n';
++        memcpy(out_names + off, pos->info.name, len);
++        off += len;
++        out_names[off] = '\0';
+     }
+-    if (off > 0) out_names[off - 1] = '\0';
+ 
+     spin_unlock_irqrestore(&module_lock, flags);
+     return off;
+@@ -634,7 +652,7 @@ int get_module_info(const char *name, char *out_info, int size)
+     struct module *mod = find_module(name);
+     if (!mod) { spin_unlock_irqrestore(&module_lock, flags); return -ENOENT; }
+ 
+-    int sz = snprintf(out_info, size - 1,
++    int sz = snprintf(out_info, size,
+                       "name=%s\n"
+                       "version=%s\n"
+                       "license=%s\n"
+@@ -644,7 +662,8 @@ int get_module_info(const char *name, char *out_info, int size)
+                       mod->info.name, mod->info.version, mod->info.license, mod->info.author, mod->info.description,
+                       mod->args);
+ 
+-    if (sz > 0) out_info[sz - 1] = '\0';
++    if (sz >= size) sz = size - 1;
++    if (sz > 0 && out_info[sz - 1] == '\n') out_info[--sz] = '\0';
+     // logkfd("%s", out_info);
+ 
+     spin_unlock_irqrestore(&module_lock, flags);
+diff --git a/kernel/patch/sukisu/bridge.c b/kernel/patch/sukisu/bridge.c
+new file mode 100644
+index 0000000..1be603c
+--- /dev/null
++++ b/kernel/patch/sukisu/bridge.c
+@@ -0,0 +1,109 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#include "supercall.h"
++#include <syscall.h>
++#include <module.h>
++#include <linux/errno.h>
++#include <predata.h>
++#include <common.h>
++#include <kallsyms.h>
++#include <linux/kernel.h>
++#include <linux/string.h>
++
++/* All strings/output buffers here are kernel-owned, except ctl0 output and
++ * the loader reserved field, which retain their original userspace ABI. */
++static long dispatch(unsigned long op, unsigned long a1, unsigned long a2,
++                     unsigned long a3, unsigned long a4)
++{
++    char *out;
++    long capacity, rc;
++    switch (op) {
++    case SUKISU_KPM_PROBE:
++        if (a1 || a2 || a3 || a4) return -EINVAL;
++        return SUKISU_KPM_ABI_VERSION;
++    case SUKISU_KPM_LOAD:
++        if (a4) return -EINVAL;
++        if (!a1) return -EINVAL;
++        return load_module_path((const char *)a1, (const char *)a2, (void *)a3);
++    case SUKISU_KPM_LOAD_EVENT:
++        if (a4) return -EINVAL;
++        if (!a1 || !a3) return -EINVAL;
++        return load_module_path_event((const char *)a1, (const char *)a2,
++                                      (const char *)a3, (void *)a4);
++    case SUKISU_KPM_UNLOAD:
++        if (a3 || a4) return -EINVAL;
++        if (!a1) return -EINVAL;
++        return unload_module((const char *)a1, (void *)a2);
++    case SUKISU_KPM_NUM:
++        if (a1 || a2 || a3 || a4) return -EINVAL;
++        return get_module_nums();
++    case SUKISU_KPM_CONTROL:
++        if (!a1 || !a2 || a4 > SUKISU_KPM_OUTPUT_MAX || (a4 && !a3)) return -EINVAL;
++        return module_control0((const char *)a1, (const char *)a2, (char __user *)a3, a4);
++    case SUKISU_KPM_LIST:
++    case SUKISU_KPM_INFO:
++    case SUKISU_KPM_VERSION:
++        if (a4 || (op != SUKISU_KPM_INFO && a3)) return -EINVAL;
++        out = (char *)(op == SUKISU_KPM_INFO ? a2 : a1);
++        capacity = op == SUKISU_KPM_INFO ? a3 : a2;
++        if (!out || capacity <= 0 || capacity > SUKISU_KPM_OUTPUT_MAX) return -EINVAL;
++        out[0] = '\0';
++        if (op == SUKISU_KPM_LIST) {
++            rc = list_modules(out, capacity);
++            return rc < 0 ? rc : strlen(out);
++        }
++        if (op == SUKISU_KPM_INFO) {
++            if (!a1) return -EINVAL;
++            rc = get_module_info((const char *)a1, out, capacity);
++            /* Legacy INFO has a fixed buffer and no size negotiation. */
++            if (rc >= capacity) rc = capacity - 1;
++        } else {
++            rc = snprintf(out, capacity, "%u (%s)", kpver, get_build_time());
++        }
++        return rc >= capacity ? -ENOBUFS : rc;
++    default:
++        return -EOPNOTSUPP;
++    }
++}
++
++static void before_supercall(hook_fargs1_t *args, void *udata)
++{
++    struct pt_regs *regs = (struct pt_regs *)args->arg0;
++    (void)udata;
++    /* Check the trusted saved mode before the public protocol tag. EL0 calls
++     * must run the original truncate even when they supply the tag: a special
++     * errno or early return would provide a trivial presence oracle.
++     * This is a kernel-call convention, NOT proof of SukiSU caller identity.
++     */
++    if (!regs || processor_mode(regs) != PSR_MODE_EL1h) return;
++    if (regs->regs[0] != SUKISU_KPM_SUPERCALL_MAGIC) return;
++    args->skip_origin = 1;
++    /* Fail closed before interpreting ANY operation pointer. Keep malformed
++     * kernel requests out of the original truncate handler as well. */
++    args->ret = -EPROTO;
++    if (regs->regs[6] != SUKISU_KPM_SUPERCALL_MAGIC2 ||
++        regs->regs[7] != SUKISU_KPM_SUPERCALL_MAGIC3 ||
++        regs->regs[8] != SUKISU_KPM_ABI_VERSION) return;
++    for (int i = 9; i < 31; i++) {
++        if (regs->regs[i]) return;
++    }
++    args->ret = dispatch(regs->regs[1], regs->regs[2], regs->regs[3],
++                         regs->regs[4], regs->regs[5]);
++}
++
++int sukisu_kpm_supercall_install(void)
++{
++    static int installed;
++    int rc;
++    unsigned long addr;
++    if (installed) return 0;
++    if (!has_syscall_wrapper) return -EOPNOTSUPP;
++    /* Hook the handler itself: a kernel direct call never enters invoke_syscall
++     * or the global EL0 dispatcher. Prefer inline over the syscall table. */
++    addr = kallsyms_lookup_name("__arm64_sys_truncate");
++    if (!addr) addr = kallsyms_lookup_name("__arm64_sys_truncate.cfi_jt");
++    if (!addr) addr = kallsyms_lookup_name("__arm64_sys_truncate.cfi");
++    if (!addr) return -ENOENT;
++    rc = hook_wrap1((void *)addr, before_supercall, 0, 0);
++    if (!rc) installed = 1;
++    return rc;
++}
+diff --git a/kernel/patch/sukisu/sukisu.c b/kernel/patch/sukisu/sukisu.c
+index c345dbc..ed4dd15 100644
+--- a/kernel/patch/sukisu/sukisu.c
++++ b/kernel/patch/sukisu/sukisu.c
+@@ -10,6 +10,7 @@
+ #include <common.h>
+ #include <module.h>
+ #include <predata.h>
++#include "supercall.h"
+ 
+ static long call_kpm_control(const char *name, const char * args, long arg_len, void *__user out_msg, int outlen)
+ {
+@@ -95,6 +96,14 @@ void init_sukisu_ultra() {
+     unsigned long addr;
+     int rc;
+ 
++    /* UAPI6 builtin removed the seven legacy stubs. Use its kernel-only
++     * bridge; retain the old path for kernels that still export the stubs. */
++    if (kallsyms_lookup_name("sukisu_kpm_bridge")) {
++        rc = sukisu_kpm_supercall_install();
++        log_boot("hook SukiSU KPM bridge ABI v2 rc:%d\n", rc);
++        return;
++    }
++
+     addr = kallsyms_lookup_name("sukisu_kpm_load_module_path");
+     if(addr) {
+         rc = hook_wrap4((void*) addr, before_sukisu_load_module_path, NULL, NULL);
+diff --git a/kernel/patch/sukisu/supercall.h b/kernel/patch/sukisu/supercall.h
+new file mode 100644
+index 0000000..158b11c
+--- /dev/null
++++ b/kernel/patch/sukisu/supercall.h
+@@ -0,0 +1,35 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++#ifndef _SUKISU_KPM_SUPERCALL_H_
++#define _SUKISU_KPM_SUPERCALL_H_
++
++/* Kernel-to-kernel ABI v2. Keep in sync with SukiSU extension/kpm/bridge.h.
++ * x0=magic, x1=op, x2=a1, x3=a2, x4=a3, x5=a4.
++ * Called directly through __arm64_sys_truncate with an EL1 pt_regs frame.
++ * Never expose kernel pointers through a userspace syscall.
++ * The magic is a PUBLIC protocol tag, not a secret or authentication token.
++ * EL0 requests always fall through to the original syscall.
++ * EL1h is a calling convention, not proof of SukiSU caller identity.
++ */
++/* Public framing tags: ALL must match. These are not authentication. */
++#define SUKISU_KPM_SUPERCALL_MAGIC 0x53554b504d000002UL
++#define SUKISU_KPM_SUPERCALL_MAGIC2 0x4b504d4252494447UL
++#define SUKISU_KPM_SUPERCALL_MAGIC3 0x53554b494e544552UL
++/* x6=magic2, x7=magic3, x8=ABI version; x9..x30 reserved (zero).
++ * Internal synthetic pt_regs only; the userspace extension ABI is unchanged.
++ * Event-aware loading is an optional operation; older SukiSU callers remain
++ * compatible with the ABI and newer callers can fall back when op 8 is absent.
++ */
++#define SUKISU_KPM_OUTPUT_MAX 4096
++#define SUKISU_KPM_LOAD 1
++#define SUKISU_KPM_UNLOAD 2
++#define SUKISU_KPM_NUM 3
++#define SUKISU_KPM_LIST 4
++#define SUKISU_KPM_INFO 5
++#define SUKISU_KPM_CONTROL 6
++#define SUKISU_KPM_VERSION 7
++#define SUKISU_KPM_LOAD_EVENT 8
++#define SUKISU_KPM_PROBE 0
++#define SUKISU_KPM_ABI_VERSION 2
++
++int sukisu_kpm_supercall_install(void);
++#endif
