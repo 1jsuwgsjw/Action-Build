@@ -1,0 +1,55 @@
+Subject: Restore the userspace-path faccessat ABI of the pinned GKI
+
+Target: builtin 1cfa5734 after adapters 12, 13 and 14.
+The pinned android15-6.6 SUSFS fs/open.c calls this handler with
+const char __user **, before user_path_at has resolved any filename.
+The UAPI6 handler must not dereference it as struct filename **.
+Reuse the existing user-copy and sh_user_path helpers, retaining the
+current chroot restriction and leaving stat/exec/UAPI6/KPM unchanged.
+
+diff --git a/kernel/feature/sucompat.c b/kernel/feature/sucompat.c
+--- a/kernel/feature/sucompat.c
++++ b/kernel/feature/sucompat.c
+@@ -195,13 +195,16 @@
+                         flags);
+ }
+ 
+-int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode,
++int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
+              int *__unused_flags)
+ {
+-    if (unlikely(IS_ERR(*filename) || (*filename)->name == NULL))
+-        return 0;
+-
+-    if (likely(memcmp((*filename)->name, su_path, sizeof(su_path))))
++    /* The pinned GKI caller passes the original userspace pathname. */
++    char path[sizeof(su_path) + 1] = {0};
++
++    if (strncpy_from_user(path, *filename_user, sizeof(path)) < 0)
++        return 0;
++
++    if (likely(memcmp(path, su_path, sizeof(su_path))))
+         return 0;
+ 
+     if (current_chrooted())
+@@ -211,7 +214,7 @@
+     }
+ 
+     pr_info("ksu_handle_faccessat: su->sh!\n");
+-    memcpy((void *)((*filename)->name), sh_path, sizeof(sh_path));
++    *filename_user = sh_user_path();
+     return 0;
+ }
+ 
+diff --git a/kernel/feature/sucompat.h b/kernel/feature/sucompat.h
+--- a/kernel/feature/sucompat.h
++++ b/kernel/feature/sucompat.h
+@@ -10,7 +10,7 @@
+ #endif
+ 
+ #ifdef CONFIG_KSU_SUSFS
+-int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode, int *__unused_flags);
++int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *__unused_flags);
+ int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
+ int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
+                  void *argv_user, void *envp_user,

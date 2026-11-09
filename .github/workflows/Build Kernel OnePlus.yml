@@ -1314,6 +1314,7 @@ jobs:
             KSU_V22_PATCHES=(
               "$TIMING_PATCH_DIR/KernelSU/13_compat_susfs_v2.2_builtin_1cfa5734.patch"
               "$TIMING_PATCH_DIR/KernelSU/14_compat_susfs_v2.2_sepolicy_tracking.patch"
+              "$TIMING_PATCH_DIR/KernelSU/15_fix_faccessat_user_pointer_abi.patch"
             )
             test "$(git -C ../KernelSU rev-parse HEAD)" = "$KSU_BUILTIN_REV"
             git -C ../KernelSU apply --check "$KSU_TIMING_PATCH"
@@ -1325,7 +1326,7 @@ jobs:
               git -C ../KernelSU apply --check "$ksu_patch"
               git -C ../KernelSU apply "$ksu_patch"
             done
-            echo "Applied pinned SUSFS v2.2.0 caller compatibility (13 + 14)"
+            echo "Applied pinned SUSFS v2.2.0 caller compatibility (13 + 14 + 15)"
             git apply "$GKI_TIMING_PATCH"
             git apply "$GKI_EXEC_PATCH"
             echo "Applied builtin UAPI6 adapters: upstream paired SELinux parser + sehide1 GKI callers, static-key sucompat, scoped su FD and preinit"
