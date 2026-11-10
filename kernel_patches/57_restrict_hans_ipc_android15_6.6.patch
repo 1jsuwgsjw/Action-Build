@@ -1,0 +1,140 @@
+Subject: Restrict Hans IPC entrypoints in the built kernel, without a framework overlay
+
+Target: Ace 6 common c1802dd6f3343e71c166a3c67c50554c81880b6e, Android 16
+framework a4308e9fe612f25770417c751e47f0fee94e92987069e30d87f707b87b2e8f37.
+
+Only UID 1000 may connect to the exact abstract hans_socket_server endpoint
+or invoke listener registration/unregistration (codes 3/4) on the exact
+com.oplus.app.IOplusHansFreezeManager interface in system_server. The installed
+Oplus Wi-Fi monitor and native hans client both run as UID 1000.
+
+Binder checks the completed kernel buffer after deferred copies and before
+queueing; failures use existing transaction cleanup. Other interfaces,
+methods, replies and Unix names retain their existing LSM checks. This does
+not implement Java signature permission checks or change any SELinux rules,
+module ABI, userspace JAR, Root/BL status or event contents.
+
+diff --git a/drivers/android/binder.c b/drivers/android/binder.c
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -42,6 +42,8 @@
+ 
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+ 
++#include <linux/cred.h>
++#include <asm/unaligned.h>
+ #include <linux/fdtable.h>
+ #include <linux/file.h>
+ #include <linux/freezer.h>
+@@ -3184,6 +3186,49 @@
+ 		binder_set_extended_error(&from->ee, id, command, param);
+ 	binder_inner_proc_unlock(from->proc);
+ 	binder_thread_dec_tmpref(from);
++}
++
++/*
++ * Current Oplus Android 16 listener transactions. Check the final kernel
++ * buffer, not the caller's mutable userspace Parcel. This is a UID policy,
++ * not an implementation of Android package-signature permissions.
++ */
++static int binder_hans_listener_access(struct binder_transaction *t,
++				       struct binder_proc *target_proc,
++				       int reply)
++{
++	static const char interface[] = "com.oplus.app.IOplusHansFreezeManager";
++	/* StrictMode, WorkSource, header, then String16 length and text. */
++	enum { header_bytes = 4 * sizeof(__le32) };
++	u8 prefix[header_bytes + 2 * sizeof(interface)];
++	char comm[TASK_COMM_LEN];
++	unsigned int i;
++	int ret;
++
++	if (reply || (t->code != 3 && t->code != 4) ||
++	    uid_eq(t->sender_euid, KUIDT_INIT(1000)) ||
++	    !uid_eq(target_proc->cred->euid, KUIDT_INIT(1000)))
++		return 0;
++
++	get_task_comm(comm, target_proc->tsk);
++	if (strcmp(comm, "system_server") ||
++	    t->buffer->data_size < sizeof(prefix))
++		return 0;
++
++	ret = binder_alloc_copy_from_buffer(&target_proc->alloc, prefix,
++					   t->buffer, 0, sizeof(prefix));
++	if (ret)
++		return ret;
++	if (get_unaligned_le32(prefix + header_bytes - sizeof(__le32)) !=
++	    sizeof(interface) - 1)
++		return 0;
++	for (i = 0; i < sizeof(interface); i++) {
++		if (prefix[header_bytes + 2 * i] != interface[i] ||
++		    prefix[header_bytes + 2 * i + 1])
++			return 0;
++	}
++
++	return -EPERM;
+ }
+ 
+ static void binder_transaction(struct binder_proc *proc,
+@@ -3894,6 +3939,15 @@
+ 		return_error_line = __LINE__;
+ 		goto err_copy_data_failed;
+ 	}
++	/* Objects and deferred copies are complete; nothing has been queued yet. */
++	ret = binder_hans_listener_access(t, target_proc, reply);
++	if (ret) {
++		return_error = BR_FAILED_REPLY;
++		return_error_param = ret;
++		return_error_line = __LINE__;
++		goto err_copy_data_failed;
++	}
++
+ 	if (t->buffer->oneway_spam_suspect)
+ 		tcomplete->type = BINDER_WORK_TRANSACTION_ONEWAY_SPAM_SUSPECT;
+ 	else
+diff --git a/net/unix/af_unix.c b/net/unix/af_unix.c
+--- a/net/unix/af_unix.c
++++ b/net/unix/af_unix.c
+@@ -77,6 +77,7 @@
+ 
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+ 
++#include <linux/cred.h>
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+ #include <linux/signal.h>
+@@ -1466,6 +1467,22 @@
+ 	return timeo;
+ }
+ 
++/* Called with the resolved listening socket's state lock held. */
++static int unix_hans_connect_access(struct sock *other)
++{
++	static const char name[] = "\0hans_socket_server";
++	const struct unix_address *addr;
++
++	if (uid_eq(current_euid(), KUIDT_INIT(1000)))
++		return 0;
++	addr = unix_sk(other)->addr;
++	if (addr->len == (int)(offsetof(struct sockaddr_un, sun_path) + sizeof(name) - 1) &&
++	    !memcmp(addr->name->sun_path, name, sizeof(name) - 1))
++		return -EACCES;
++
++	return 0;
++}
++
+ static int unix_stream_connect(struct socket *sock, struct sockaddr *uaddr,
+ 			       int addr_len, int flags)
+ {
+@@ -1534,6 +1551,11 @@
+ 	if (other->sk_state != TCP_LISTEN)
+ 		goto out_unlock;
+ 	if (other->sk_shutdown & RCV_SHUTDOWN)
++		goto out_unlock;
++
++	/* Do not let untrusted clients enter the Hans listener's backlog. */
++	err = unix_hans_connect_access(other);
++	if (err)
+ 		goto out_unlock;
+ 
+ 	if (unix_recvq_full_lockless(other)) {

@@ -43,3 +43,19 @@
 所以当前不能把本补丁当作已证实的游戏检测修复。手机 KPM 上次已回退 p1；activity2 是未部署候选，与这次内核补丁分开。
 
 下一步若继续交付可刷包：先把本轮三个文件提交到自有仓库并完成 Ace 6 CI 编译。刷机和厂商服务兼容性验证尚未执行；不要为验证而在当前手机盲目发送 SENDPID、卸载模块或制造提权事件。
+
+## 2026-11-10 后续：Hans 改走纯内核路线
+
+用户明确不采用框架模块。手机原Jar仍为原始SHA256，hans_auth_fix未安装，之前Download中的模块候选已撤下；不安装模块、不改Jar。
+
+新增 `kernel_patches/57_restrict_hans_ipc_android15_6.6.patch`，仍在本仓库固定common构建中应用：
+
+- AF_UNIX：查找并锁住真实监听socket后，精确匹配抽象名 `hans_socket_server`（不是前缀，不是文件路径）。非UID1000返回EACCES，在进入backlog之前拒绝；其余连接仍走原有LSM检查。不会全局删除应用到system_server的SELinux规则。
+- Binder：只看发往UID1000/system_server、接口 `com.oplus.app.IOplusHansFreezeManager`、事务3/4的非回复请求。匹配发生在对象转换/延迟复制完成后的内核buffer，避免检查用户内存后又重新复制的TOCTOU；非UID1000返回BR_FAILED_REPLY，错误参数EPERM，复用现有buffer/对象/FD/事务清理路径，未入队。
+- 本轮已从手机Jar确认事务号3/4，并找到正常订阅者 `com.oplus.server.wifi.power.OplusHansFreezeMonitor`；该Jar映射在UID1000的system_server。原生hans客户端也为UID1000。
+- **这是UID1000策略，不等同于Android签名权限检查。** 非1000的签名应用也不能调用这两个私有方法；未穷尽所有其他合法客户端。其他Hans方法、Binder接口、回复和Unix地址不受这项新增限制。
+- 不改变事件内容、Root/BL/TEE状态，不新增导出ABI，不把此修复当作游戏检测原因已解决。
+
+固定源补丁应用、工作流语法、复制完成/入队顺序和原失败路径核对通过。复用现有ARM64模拟执行器编译实际两个C helper，21条本地定向用例通过（凭据/结构和copy后端为替身，不是实机内核执行）。完整CI及安装后运行效果另行记录；本轮不代用户刷入或重启。
+
+工作流新增独立 `Restrict Hans IPC entrypoints` 步骤，并在现有构建证据中带出binder/af_unix源码和对象。模块路线文件仍保留在本地作为参考，不纳入本次内核提交。
