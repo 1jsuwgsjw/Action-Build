@@ -1,0 +1,78 @@
+Subject: Restrict the Oplus secure_guard receiver through the built Image
+
+Target: Ace 6 common c1802dd6f3343e71c166a3c67c50554c81880b6e (android15-6.6).
+The existing workflow builds common/Image, not the shipped vendor_dlkm module.
+Apply the checks at Generic Netlink dispatch for secure_guard SENDPID only:
+use the core CAP_NET_ADMIN check, strict native-endian u32 attributes, and
+require the receiver to equal NETLINK_CB(skb).portid before vendor callbacks.
+Do not disable the module or change event contents or other families.
+
+Clients must send a four-byte MSG equal to their bound socket portid and pass
+netlink_capable(CAP_NET_ADMIN). The vendor daemon's credentials and wire
+format still require device verification. No module ABI or export changes.
+
+diff --git a/net/netlink/genetlink.c b/net/netlink/genetlink.c
+--- a/net/netlink/genetlink.c
++++ b/net/netlink/genetlink.c
+@@ -935,6 +935,29 @@
+ 	return err;
+ }
+ 
++/*
++ * The shipped Oplus module declares SENDPID's u32 as a string and accepts
++ * arbitrary receiver portids without authorization. Enforce its receive ABI
++ * here because this Image build does not replace vendor_dlkm modules.
++ */
++enum {
++	OPLUS_SG_CMD_SENDPID = 1,
++	OPLUS_SG_ATTR_MSG = 1,
++	OPLUS_SG_ATTR_OPT = 2,
++};
++
++static const struct nla_policy oplus_sg_policy[OPLUS_SG_ATTR_OPT + 1] = {
++	[OPLUS_SG_ATTR_MSG] = { .type = NLA_U32 },
++	[OPLUS_SG_ATTR_OPT] = { .type = NLA_U32 },
++};
++
++static bool genl_is_oplus_sg_sendpid(const struct genl_family *family,
++				   const struct genl_split_ops *ops)
++{
++	return ops->cmd == OPLUS_SG_CMD_SENDPID &&
++		!strcmp(family->name, "secure_guard");
++}
++
+ static int genl_family_rcv_msg_doit(const struct genl_family *family,
+ 				    struct sk_buff *skb,
+ 				    struct nlmsghdr *nlh,
+@@ -961,6 +984,16 @@
+ 	info.extack = extack;
+ 	genl_info_net_set(&info, net);
+ 	memset(&info.user_ptr, 0, sizeof(info.user_ptr));
++
++	if (genl_is_oplus_sg_sendpid(family, ops)) {
++		/* The module consumes this same parsed attribute, including duplicates. */
++		if (!info.attrs[OPLUS_SG_ATTR_MSG] || !info.snd_portid ||
++		    nla_get_u32(info.attrs[OPLUS_SG_ATTR_MSG]) != info.snd_portid) {
++			NL_SET_ERR_MSG(extack, "secure_guard receiver must be the sender");
++			err = -EINVAL;
++			goto out;
++		}
++	}
+ 
+ 	if (ops->pre_doit) {
+ 		err = ops->pre_doit(ops, skb, &info);
+@@ -1035,6 +1068,14 @@
+ 		GENL_CMD_CAP_DUMP : GENL_CMD_CAP_DO;
+ 	if (genl_get_cmd(hdr->cmd, flags, family, &op))
+ 		return -EOPNOTSUPP;
++
++	if (genl_is_oplus_sg_sendpid(family, &op)) {
++		op.flags |= GENL_ADMIN_PERM;
++		op.policy = oplus_sg_policy;
++		op.maxattr = OPLUS_SG_ATTR_OPT;
++		/* Require exactly four payload bytes; do not validate as a string. */
++		op.validate &= ~GENL_DONT_VALIDATE_STRICT;
++	}
+ 
+ 	if ((op.flags & GENL_ADMIN_PERM) &&
+ 	    !netlink_capable(skb, CAP_NET_ADMIN))
